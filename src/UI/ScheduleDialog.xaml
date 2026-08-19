@@ -1,0 +1,163 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Add Scheduled Action"
+    Width="340" Height="340"
+    ResizeMode="NoResize"
+    WindowStartupLocation="CenterOwner"
+    Background="#1E1E2E"
+    FontFamily="Segoe UI">
+  <Window.Resources>
+    <Style x:Key="FieldLabel" TargetType="TextBlock">
+      <Setter Property="Foreground" Value="#6C7086"/>
+      <Setter Property="FontSize" Value="10"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Margin" Value="0,0,0,6"/>
+    </Style>
+    <Style x:Key="InputBox" TargetType="ComboBox">
+      <Setter Property="Background" Value="#2A2A3E"/>
+      <Setter Property="Foreground" Value="#CDD6F4"/>
+      <Setter Property="BorderBrush" Value="#45475A"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Height" Value="36"/>
+      <Setter Property="Padding" Value="10,0"/>
+      <Setter Property="FontSize" Value="13"/>
+    </Style>
+    <Style x:Key="DayToggle" TargetType="ToggleButton">
+      <Setter Property="Background" Value="#2A2A3E"/>
+      <Setter Property="Foreground" Value="#BAC2DE"/>
+      <Setter Property="BorderBrush" Value="#45475A"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Width" Value="38"/>
+      <Setter Property="Height" Value="32"/>
+      <Setter Property="FontSize" Value="11"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="4">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#7C9DDA"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#7C9DDA"/>
+                <Setter Property="Foreground" Value="#1E1E2E"/>
+              </Trigger>
+              <MultiTrigger>
+                <MultiTrigger.Conditions>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                  <Condition Property="IsChecked" Value="False"/>
+                </MultiTrigger.Conditions>
+                <Setter TargetName="Bd" Property="Background" Value="#313244"/>
+              </MultiTrigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="PrimaryBtn" TargetType="Button">
+      <Setter Property="Background" Value="#7C9DDA"/>
+      <Setter Property="Foreground" Value="#1E1E2E"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#89B4FA"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+    <Style x:Key="SecondaryBtn" TargetType="Button">
+      <Setter Property="Background" Value="#313244"/>
+      <Setter Property="Foreground" Value="#CDD6F4"/>
+      <Setter Property="BorderBrush" Value="#45475A"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#45475A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Window.Resources>
+  <Grid Margin="24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+    <TextBlock Grid.Row="0" Text="ACTION" Style="{StaticResource FieldLabel}"/>
+    <ComboBox Grid.Row="0" x:Name="CmbAction" Style="{StaticResource InputBox}" Margin="0,16,0,14">
+      <ComboBoxItem Content="Shutdown" IsSelected="True"/>
+      <ComboBoxItem Content="Restart"/>
+      <ComboBoxItem Content="Sleep"/>
+      <ComboBoxItem Content="Hibernate"/>
+    </ComboBox>
+    <TextBlock Grid.Row="1" Text="RECURRENCE" Style="{StaticResource FieldLabel}"/>
+    <ComboBox Grid.Row="1" x:Name="CmbRecurrence" Style="{StaticResource InputBox}" Margin="0,16,0,14">
+      <ComboBoxItem Content="Once" IsSelected="True"/>
+      <ComboBoxItem Content="Daily"/>
+      <ComboBoxItem Content="Weekly"/>
+    </ComboBox>
+    <StackPanel Grid.Row="2" x:Name="PanelDays" Visibility="Collapsed" Margin="0,0,0,14">
+      <TextBlock Text="DAYS" Style="{StaticResource FieldLabel}"/>
+      <StackPanel Orientation="Horizontal">
+        <ToggleButton x:Name="DayMon" Content="Mo" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DayTue" Content="Tu" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DayWed" Content="We" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DayThu" Content="Th" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DayFri" Content="Fr" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DaySat" Content="Sa" Style="{StaticResource DayToggle}" Margin="0,0,4,0"/>
+        <ToggleButton x:Name="DaySun" Content="Su" Style="{StaticResource DayToggle}"/>
+      </StackPanel>
+    </StackPanel>
+    <TextBlock Grid.Row="3" Text="TIME  (HH:MM — 24-hour)" Style="{StaticResource FieldLabel}"/>
+    <Border Grid.Row="3" Background="#2A2A3E" CornerRadius="6"
+            BorderBrush="#45475A" BorderThickness="1" Height="36" Margin="0,16,0,14">
+      <TextBox x:Name="TxtDlgTime" Background="Transparent" Foreground="#CDD6F4"
+               BorderThickness="0" Padding="10,0" FontSize="13"
+               VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+    </Border>
+    <TextBlock Grid.Row="4" x:Name="LblDlgError" Text=""
+               Foreground="#F38BA8" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
+      <Button x:Name="BtnDlgCancel" Content="Cancel"
+              Style="{StaticResource SecondaryBtn}" Padding="16,9" Margin="0,0,8,0"/>
+      <Button x:Name="BtnDlgCreate" Content="Create"
+              Style="{StaticResource PrimaryBtn}" Padding="20,9"/>
+    </StackPanel>
+  </Grid>
+</Window>

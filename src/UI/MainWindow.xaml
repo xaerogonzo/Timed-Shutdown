@@ -1,0 +1,747 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Window
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="Timed Shutdown"
+    Width="490" Height="800"
+    ResizeMode="CanResize" MinWidth="470" MinHeight="700"
+    WindowStartupLocation="CenterScreen"
+    Background="#1E1E2E"
+    FontFamily="Segoe UI">
+
+  <Window.Resources>
+
+    <Style TargetType="ScrollBar">
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="Width" Value="8"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ScrollBar">
+            <Grid Background="Transparent">
+              <Track x:Name="PART_Track" IsDirectionReversed="True">
+                <Track.Thumb>
+                  <Thumb>
+                    <Thumb.Template>
+                      <ControlTemplate TargetType="Thumb">
+                        <Border Background="#45475A" CornerRadius="3" Margin="2"/>
+                      </ControlTemplate>
+                    </Thumb.Template>
+                  </Thumb>
+                </Track.Thumb>
+              </Track>
+            </Grid>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="ActionToggle" TargetType="ToggleButton">
+      <Setter Property="Background" Value="#2A2A3E"/>
+      <Setter Property="Foreground" Value="#BAC2DE"/>
+      <Setter Property="BorderBrush" Value="#45475A"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Padding" Value="0,10"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#7C9DDA"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#7C9DDA"/>
+                <Setter Property="Foreground" Value="#1E1E2E"/>
+              </Trigger>
+              <MultiTrigger>
+                <MultiTrigger.Conditions>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                  <Condition Property="IsChecked" Value="False"/>
+                </MultiTrigger.Conditions>
+                <Setter TargetName="Bd" Property="Background" Value="#313244"/>
+                <Setter TargetName="Bd" Property="BorderBrush" Value="#585B70"/>
+              </MultiTrigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="PrimaryBtn" TargetType="Button">
+      <Setter Property="Background" Value="#7C9DDA"/>
+      <Setter Property="Foreground" Value="#1E1E2E"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="14"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#89B4FA"/>
+              </Trigger>
+              <Trigger Property="IsPressed" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#6785BE"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Background" Value="#313244"/>
+                <Setter Property="Foreground" Value="#45475A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="DangerBtn" TargetType="Button">
+      <Setter Property="Background" Value="#F38BA8"/>
+      <Setter Property="Foreground" Value="#1E1E2E"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="FontWeight" Value="SemiBold"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}" CornerRadius="6"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#F5A3B5"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter TargetName="Bd" Property="Background" Value="#313244"/>
+                <Setter Property="Foreground" Value="#45475A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style x:Key="SecondaryBtn" TargetType="Button">
+      <Setter Property="Background" Value="#313244"/>
+      <Setter Property="Foreground" Value="#CDD6F4"/>
+      <Setter Property="BorderBrush" Value="#45475A"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="Bd" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    CornerRadius="6" Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="Bd" Property="Background" Value="#45475A"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <Style TargetType="CheckBox">
+      <Setter Property="Foreground" Value="#BAC2DE"/>
+      <Setter Property="FontSize" Value="13"/>
+      <Setter Property="VerticalContentAlignment" Value="Center"/>
+      <Setter Property="Cursor" Value="Hand"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="CheckBox">
+            <StackPanel Orientation="Horizontal">
+              <Border x:Name="ChkBd" Width="15" Height="15" CornerRadius="3"
+                      Background="#2A2A3E" BorderBrush="#585B70" BorderThickness="1.5"
+                      VerticalAlignment="Center" Margin="0,0,7,0">
+                <TextBlock x:Name="ChkMark" Text="&#x2713;" Foreground="#89B4FA"
+                           FontSize="10" HorizontalAlignment="Center"
+                           VerticalAlignment="Center" Visibility="Collapsed"/>
+              </Border>
+              <ContentPresenter VerticalAlignment="Center"/>
+            </StackPanel>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="ChkBd" Property="Background" Value="#1C2C4A"/>
+                <Setter TargetName="ChkBd" Property="BorderBrush" Value="#7C9DDA"/>
+                <Setter TargetName="ChkMark" Property="Visibility" Value="Visible"/>
+              </Trigger>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ChkBd" Property="BorderBrush" Value="#7C9DDA"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+    <!--
+      Padding carries 4px of slack on the right that the old 4,0,4,10 did not.
+      TabPanel sizes each tab from its normal-weight text, but the IsSelected
+      trigger below switches the header to SemiBold, which measures ~1.7px wider
+      at 14px Segoe UI - enough to clip the last glyph ("Timers" -> "Timer").
+      Total horizontal space per tab is unchanged: Margin drops 12 -> 8 as
+      Padding gains 4, so the strip looks the same but the text always fits.
+    -->
+    <Style TargetType="TabItem">
+      <Setter Property="Foreground" Value="#6C7086"/>
+      <Setter Property="Background" Value="Transparent"/>
+      <Setter Property="BorderThickness" Value="0"/>
+      <Setter Property="Padding" Value="4,0,8,10"/>
+      <Setter Property="Margin" Value="0,0,8,0"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="TabItem">
+            <Border x:Name="TabBd" Background="Transparent"
+                    BorderThickness="0,0,0,2" BorderBrush="Transparent"
+                    Padding="{TemplateBinding Padding}" Cursor="Hand">
+              <TextBlock x:Name="TabTxt" Text="{TemplateBinding Header}"
+                         FontSize="14" Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="TabBd" Property="BorderBrush" Value="#7C9DDA"/>
+                <Setter TargetName="TabTxt" Property="Foreground" Value="#CDD6F4"/>
+                <Setter TargetName="TabTxt" Property="FontWeight" Value="SemiBold"/>
+              </Trigger>
+              <MultiTrigger>
+                <MultiTrigger.Conditions>
+                  <Condition Property="IsMouseOver" Value="True"/>
+                  <Condition Property="IsSelected" Value="False"/>
+                </MultiTrigger.Conditions>
+                <Setter TargetName="TabTxt" Property="Foreground" Value="#BAC2DE"/>
+              </MultiTrigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
+  </Window.Resources>
+
+  <Grid Margin="24,20,24,24">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+    </Grid.RowDefinitions>
+
+    <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,18">
+      <TextBlock Text="&#x23FB;" FontSize="22" Foreground="#7C9DDA"
+                 VerticalAlignment="Center" Margin="0,0,10,3"/>
+      <TextBlock x:Name="LblAppTitle" Text="Timed Shutdown" FontSize="20" FontWeight="Bold"
+                 Foreground="#CDD6F4" VerticalAlignment="Center"/>
+    </StackPanel>
+
+    <TabControl Grid.Row="1" x:Name="MainTabs" Background="Transparent" BorderThickness="0">
+      <TabControl.Template>
+        <ControlTemplate TargetType="TabControl">
+          <Grid>
+            <Grid.RowDefinitions>
+              <RowDefinition Height="Auto"/>
+              <RowDefinition Height="*"/>
+            </Grid.RowDefinitions>
+            <TabPanel Grid.Row="0" IsItemsHost="True" Background="Transparent"/>
+            <Border Grid.Row="1" Background="Transparent" Padding="0,18,0,0">
+              <!--
+                The name PART_SelectedContentHost is required, not decorative.
+                TabControl looks it up to populate SelectedContentHost, and
+                TabItemAutomationPeer resolves the selected tab's content
+                through that property. Unnamed, the whole tab content is absent
+                from the UI Automation tree: screen readers see three tab
+                headers and nothing else, and no control inside a tab can be
+                reached by assistive technology or UI testing.
+              -->
+              <ContentPresenter x:Name="PART_SelectedContentHost" ContentSource="SelectedContent"/>
+            </Border>
+          </Grid>
+        </ControlTemplate>
+      </TabControl.Template>
+
+      <!-- ══ Timers Tab ══ -->
+      <TabItem Header="Timers">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <TextBlock Grid.Row="0" Text="ACTION" FontSize="10" Foreground="#6C7086"
+                     FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+          <UniformGrid Grid.Row="1" Columns="4" Margin="0,0,0,18">
+            <ToggleButton x:Name="BtnShutdown" IsChecked="True" Content="Shutdown"
+                          Style="{StaticResource ActionToggle}" Margin="0,0,4,0"/>
+            <ToggleButton x:Name="BtnRestart" Content="Restart"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,4,0"/>
+            <ToggleButton x:Name="BtnSleep" Content="Sleep"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,4,0"/>
+            <ToggleButton x:Name="BtnHibernate" Content="Hibernate"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,0,0"/>
+          </UniformGrid>
+
+          <TextBlock Grid.Row="2" Text="TIME" FontSize="10" Foreground="#6C7086"
+                     FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+          <Grid Grid.Row="3" Margin="0,0,0,8">
+            <Border Background="#2A2A3E" CornerRadius="6"
+                    BorderBrush="#45475A" BorderThickness="1" Height="44">
+              <Grid>
+                <TextBox x:Name="TxtTime" Background="Transparent" Foreground="#CDD6F4"
+                         BorderThickness="0" Padding="12,0" FontSize="14"
+                         VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                <TextBlock x:Name="TxtPlaceholder"
+                           Text="e.g.  1h30m  &#183;  45m  &#183;  2h  &#183;  22:30"
+                           Foreground="#45475A" FontSize="14"
+                           Margin="13,0,0,0" VerticalAlignment="Center"
+                           IsHitTestVisible="False"/>
+              </Grid>
+            </Border>
+          </Grid>
+
+          <TextBlock x:Name="LblPreview" Grid.Row="4"
+                     Text="Enter a time above to preview"
+                     Foreground="#6C7086" FontSize="13"
+                     TextWrapping="Wrap" Margin="0,0,0,14"/>
+
+          <Button x:Name="BtnStart" Grid.Row="5" Content="Start Timer"
+                  Style="{StaticResource PrimaryBtn}"
+                  Height="42" HorizontalAlignment="Stretch"
+                  Padding="0" Margin="0,0,0,12"/>
+
+          <!-- Options section -->
+          <Border Grid.Row="6" Background="#161626" CornerRadius="6"
+                  Padding="14,10" Margin="0,0,0,14">
+            <StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <CheckBox x:Name="ChkNotify" VerticalAlignment="Center" Margin="0,0,0,0"/>
+                <TextBlock Text="Notify" Foreground="#BAC2DE" FontSize="13"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="44" Height="26"
+                        BorderBrush="#45475A" BorderThickness="1" Margin="0,0,6,0">
+                  <TextBox x:Name="TxtNotifyMins" Background="Transparent" Foreground="#CDD6F4"
+                           BorderThickness="0" Padding="4,0" FontSize="12" Text="5"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"
+                           HorizontalContentAlignment="Center"/>
+                </Border>
+                <TextBlock Text="min before" Foreground="#6C7086" FontSize="13"
+                           VerticalAlignment="Center"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,8">
+                <CheckBox x:Name="ChkGuardNetwork" VerticalAlignment="Center" Margin="0,0,0,0"/>
+                <TextBlock Text="Network guard" Foreground="#BAC2DE" FontSize="13"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="54" Height="26"
+                        BorderBrush="#45475A" BorderThickness="1" Margin="0,0,6,0">
+                  <TextBox x:Name="TxtNetKbps" Background="Transparent" Foreground="#CDD6F4"
+                           BorderThickness="0" Padding="4,0" FontSize="12" Text="100"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"
+                           HorizontalContentAlignment="Center"/>
+                </Border>
+                <TextBlock Text="KB/s threshold" Foreground="#6C7086" FontSize="13"
+                           VerticalAlignment="Center"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <CheckBox x:Name="ChkGuardProcess" VerticalAlignment="Center" Margin="0,0,0,0"/>
+                <TextBlock Text="Process guard" Foreground="#BAC2DE" FontSize="13"
+                           VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Height="26" MinWidth="120"
+                        BorderBrush="#45475A" BorderThickness="1">
+                  <TextBox x:Name="TxtProcessName" Background="Transparent" Foreground="#CDD6F4"
+                           BorderThickness="0" Padding="6,0" FontSize="12"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <!--
+            The active timer scrolls; Quick Actions stay pinned.
+
+            These used to share one StackPanel, which neither clips nor scrolls.
+            When the active-timer panel appeared it pushed Quick Actions past the
+            bottom of a fixed-size, non-resizable window, so "Turn Off Monitor"
+            and "Lock Screen" became unreachable exactly while a timer was
+            running - which is when they are most wanted. The layout had ~2px of
+            slack even before the guard banner, so window chrome or DPI rounding
+            was enough to lose them.
+          -->
+          <Grid Grid.Row="7">
+            <Grid.RowDefinitions>
+              <RowDefinition Height="*"/>
+              <RowDefinition Height="Auto"/>
+            </Grid.RowDefinitions>
+
+            <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+              <StackPanel>
+                <Rectangle Height="1" Fill="#313244" Margin="0,0,0,12"/>
+                <TextBlock Text="ACTIVE TIMER" FontSize="10" Foreground="#6C7086"
+                           FontWeight="SemiBold" Margin="0,0,0,10"/>
+                <TextBlock x:Name="LblNoTimer" Text="No active timer"
+                           Foreground="#45475A" FontSize="13"/>
+
+              <Border x:Name="PanelActive" Background="#2A2A3E" CornerRadius="8"
+                      Padding="18,14" Visibility="Collapsed">
+                <Grid>
+                  <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                  </Grid.RowDefinitions>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock x:Name="LblActiveType" Grid.Row="0" Grid.Column="0"
+                             Text="SHUTDOWN" Foreground="#7C9DDA"
+                             FontSize="10" FontWeight="SemiBold"/>
+                  <TextBlock x:Name="LblCountdown" Grid.Row="1" Grid.Column="0"
+                             Text="--h --m --s" Foreground="#CDD6F4"
+                             FontSize="28" FontWeight="Bold" Margin="0,2,0,2"/>
+                  <Button Grid.Row="0" Grid.RowSpan="2" Grid.Column="1"
+                          x:Name="BtnCancel" Content="Cancel"
+                          Style="{StaticResource DangerBtn}"
+                          Padding="14,8" VerticalAlignment="Center" Margin="12,0,0,0"/>
+                  <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Margin="0,8,0,0">
+                    <TextBlock x:Name="LblActiveTarget" Text=""
+                               Foreground="#6C7086" FontSize="12"/>
+                    <StackPanel Orientation="Horizontal" Margin="0,5,0,0">
+                      <TextBlock x:Name="LblSleepSuppressed" Text="&#x25CF; Keeping PC awake"
+                                 Foreground="#A6E3A1" FontSize="11"
+                                 Visibility="Collapsed" Margin="0,0,14,0"/>
+                      <TextBlock x:Name="LblGuardBlocked" Text=""
+                                 Foreground="#FAB387" FontSize="11" Visibility="Collapsed"/>
+                    </StackPanel>
+                    <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                      <Button x:Name="BtnSnooze15" Content="+15m"
+                              Style="{StaticResource SecondaryBtn}"
+                              Padding="8,5" FontSize="12" Margin="0,0,6,0"/>
+                      <Button x:Name="BtnSnooze30" Content="+30m"
+                              Style="{StaticResource SecondaryBtn}"
+                              Padding="8,5" FontSize="12" Margin="0,0,6,0"/>
+                      <Button x:Name="BtnSnooze60" Content="+1h"
+                              Style="{StaticResource SecondaryBtn}"
+                              Padding="8,5" FontSize="12"/>
+                    </StackPanel>
+                  </StackPanel>
+                </Grid>
+              </Border>
+              </StackPanel>
+            </ScrollViewer>
+
+            <!-- Row 1 is Auto and outside the ScrollViewer: always on screen. -->
+            <StackPanel Grid.Row="1">
+              <Rectangle Height="1" Fill="#313244" Margin="0,14,0,12"/>
+              <TextBlock Text="QUICK ACTIONS" FontSize="10" Foreground="#6C7086"
+                         FontWeight="SemiBold" Margin="0,0,0,10"/>
+              <StackPanel Orientation="Horizontal">
+                <Button x:Name="BtnMonitorOff" Content="Turn Off Monitor"
+                        Style="{StaticResource SecondaryBtn}"
+                        Padding="14,9" Margin="0,0,8,0"/>
+                <Button x:Name="BtnLockScreen" Content="Lock Screen"
+                        Style="{StaticResource SecondaryBtn}" Padding="14,9"/>
+              </StackPanel>
+            </StackPanel>
+          </Grid>
+        </Grid>
+      </TabItem>
+
+      <!-- ══ Idle Tab ══ -->
+      <!-- ══ Triggers Tab ══ -->
+      <!--
+        Replaces the old Idle tab: "wait for idle" is one kind of trigger, and
+        two tabs that both mean "watch a condition then fire" would be
+        incoherent. The idle evaluator is the v1 logic, unchanged.
+      -->
+      <TabItem Header="Triggers">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <TextBlock Grid.Row="0" Text="WAIT FOR" FontSize="10" Foreground="#6C7086"
+                     FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+          <ComboBox Grid.Row="1" x:Name="CmbTriggerKind" Height="34" Margin="0,0,0,14"
+                    Background="#2A2A3E" Foreground="#CDD6F4" BorderBrush="#45475A"
+                    VerticalContentAlignment="Center" FontSize="13">
+            <ComboBoxItem Content="A process exits"/>
+            <ComboBoxItem Content="Downloads finish"/>
+            <ComboBoxItem Content="A signal file appears"/>
+            <ComboBoxItem Content="Network / CPU go quiet"/>
+            <ComboBoxItem Content="The PC goes idle"/>
+          </ComboBox>
+
+          <!-- Per-kind configuration; exactly one is visible at a time. -->
+          <Grid Grid.Row="2" Margin="0,0,0,14">
+
+            <StackPanel x:Name="CfgProcess" Visibility="Visible">
+              <TextBlock Text="PROCESS NAMES  (comma separated, no .exe)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34" Margin="0,0,0,8">
+                <Grid>
+                  <TextBox x:Name="TxtProcNames" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="13" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                  <TextBlock x:Name="TxtProcNamesPlaceholder" Text="e.g.  ffmpeg, HandBrake"
+                             Foreground="#45475A" FontSize="13" Margin="11,0,0,0"
+                             VerticalAlignment="Center" IsHitTestVisible="False"/>
+                </Grid>
+              </Border>
+              <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="RbProcAll" Content="all have exited" IsChecked="True"
+                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
+                <RadioButton x:Name="RbProcAny" Content="any one exits"
+                             Foreground="#BAC2DE" FontSize="12"/>
+              </StackPanel>
+            </StackPanel>
+
+            <StackPanel x:Name="CfgDownloads" Visibility="Collapsed">
+              <TextBlock Text="WATCH FOLDER" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34" Margin="0,0,0,8">
+                <TextBox x:Name="TxtDownloadPath" Background="Transparent" BorderThickness="0"
+                         Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                         VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+              </Border>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="settle" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="46" Height="24" Margin="8,0,8,0"
+                        BorderBrush="#45475A" BorderThickness="1">
+                  <TextBox x:Name="TxtSettleSec" Text="30" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" TextAlignment="Center"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <TextBlock Text="s" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center" Margin="0,0,14,0"/>
+                <CheckBox x:Name="ChkRecurse" Content="include subfolders" FontSize="12"/>
+              </StackPanel>
+            </StackPanel>
+
+            <StackPanel x:Name="CfgSignal" Visibility="Collapsed">
+              <TextBlock Text="SIGNAL FILE  (deleted when detected)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34" Margin="0,0,0,6">
+                <TextBox x:Name="TxtSignalPath" Background="Transparent" BorderThickness="0"
+                         Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                         VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+              </Border>
+              <TextBlock Text="Any tool that can run a command can trigger this — see the README."
+                         Foreground="#6C7086" FontSize="11" TextWrapping="Wrap"/>
+            </StackPanel>
+
+            <StackPanel x:Name="CfgResource" Visibility="Collapsed">
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <CheckBox x:Name="ChkResNet" Content="Network below" IsChecked="True" FontSize="12"
+                          VerticalAlignment="Center"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="54" Height="24" Margin="8,0,6,0"
+                        BorderBrush="#45475A" BorderThickness="1">
+                  <TextBox x:Name="TxtResKbps" Text="100" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" TextAlignment="Center"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <TextBlock Text="KB/s" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                <CheckBox x:Name="ChkResCpu" Content="CPU below" FontSize="12" VerticalAlignment="Center"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="54" Height="24" Margin="8,0,6,0"
+                        BorderBrush="#45475A" BorderThickness="1">
+                  <TextBox x:Name="TxtResCpu" Text="10" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" TextAlignment="Center"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <TextBlock Text="%" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <RadioButton x:Name="RbResAll" Content="all enabled" IsChecked="True"
+                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,12,0"/>
+                <RadioButton x:Name="RbResAny" Content="any enabled"
+                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
+                <TextBlock Text="for" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
+                <Border Background="#2A2A3E" CornerRadius="4" Width="50" Height="24" Margin="6,0,6,0"
+                        BorderBrush="#45475A" BorderThickness="1">
+                  <TextBox x:Name="TxtResSustain" Text="120" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" TextAlignment="Center"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <TextBlock Text="s" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
+              </StackPanel>
+            </StackPanel>
+
+            <StackPanel x:Name="CfgIdle" Visibility="Collapsed">
+              <TextBlock Text="IDLE THRESHOLD" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34">
+                <Grid>
+                  <TextBox x:Name="TxtIdleTime" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="13" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                  <TextBlock x:Name="TxtIdlePlaceholder" Text="e.g.  30m  &#183;  1h"
+                             Foreground="#45475A" FontSize="13" Margin="11,0,0,0"
+                             VerticalAlignment="Center" IsHitTestVisible="False"/>
+                </Grid>
+              </Border>
+            </StackPanel>
+          </Grid>
+
+          <TextBlock Grid.Row="3" Text="THEN" FontSize="10" Foreground="#6C7086"
+                     FontWeight="SemiBold" Margin="0,0,0,8"/>
+
+          <UniformGrid Grid.Row="4" Columns="4" Margin="0,0,0,14">
+            <ToggleButton x:Name="TrgBtnShutdown" IsChecked="True" Content="Shutdown"
+                          Style="{StaticResource ActionToggle}" Margin="0,0,4,0"/>
+            <ToggleButton x:Name="TrgBtnRestart" Content="Restart"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,4,0"/>
+            <ToggleButton x:Name="TrgBtnSleep" Content="Sleep"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,4,0"/>
+            <ToggleButton x:Name="TrgBtnHibernate" Content="Hibernate"
+                          Style="{StaticResource ActionToggle}" Margin="4,0,0,0"/>
+          </UniformGrid>
+
+          <!-- Status scrolls; the arm/disarm button stays pinned in row 6. -->
+          <ScrollViewer Grid.Row="5" VerticalScrollBarVisibility="Auto"
+                        HorizontalScrollBarVisibility="Disabled">
+            <StackPanel>
+              <Rectangle Height="1" Fill="#313244" Margin="0,0,0,12"/>
+              <TextBlock Text="STATUS" FontSize="10" Foreground="#6C7086"
+                         FontWeight="SemiBold" Margin="0,0,0,10"/>
+              <TextBlock x:Name="LblTriggerState" Text="Not armed"
+                         Foreground="#45475A" FontSize="13" Margin="0,0,0,4"/>
+              <TextBlock x:Name="LblTriggerStatus" Text="" Foreground="#6C7086"
+                         FontSize="12" TextWrapping="Wrap"/>
+
+              <Border x:Name="PanelGrace" Background="#3A2A2E" CornerRadius="8"
+                      Padding="16,12" Margin="0,12,0,0" Visibility="Collapsed">
+                <StackPanel>
+                  <TextBlock x:Name="LblGraceHeadline" Text="Acting in 60s"
+                             Foreground="#F38BA8" FontSize="20" FontWeight="Bold"/>
+                  <TextBlock x:Name="LblGraceWhy" Text="" Foreground="#BAC2DE"
+                             FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                  <TextBlock Text="Move the mouse or press a key to cancel."
+                             Foreground="#6C7086" FontSize="11" Margin="0,4,0,0"/>
+                  <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <Button x:Name="BtnGraceCancel" Content="Cancel"
+                            Style="{StaticResource DangerBtn}" Padding="14,7" Margin="0,0,8,0"/>
+                    <Button x:Name="BtnGraceSnooze" Content="Snooze 15m"
+                            Style="{StaticResource SecondaryBtn}" Padding="14,7"/>
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+
+          <Button Grid.Row="6" x:Name="BtnTriggerArm" Content="Arm Trigger"
+                  Style="{StaticResource PrimaryBtn}" Height="42"
+                  HorizontalAlignment="Stretch" Margin="0,14,0,0"/>
+        </Grid>
+      </TabItem>
+      <TabItem Header="Scheduled">
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <TextBlock Grid.Row="0" Text="SCHEDULED ACTIONS" FontSize="10" Foreground="#6C7086"
+                     FontWeight="SemiBold" Margin="0,0,0,10"/>
+
+          <Border Grid.Row="1" Background="#2A2A3E" CornerRadius="8"
+                  Margin="0,0,0,12" Padding="4">
+            <ListView x:Name="LvScheduled" Background="Transparent" BorderThickness="0"
+                      Foreground="#CDD6F4" VirtualizingPanel.IsVirtualizing="False"
+                      ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+              <ListView.Resources>
+                <Style TargetType="ListViewItem">
+                  <Setter Property="Background" Value="Transparent"/>
+                  <Setter Property="Foreground" Value="#CDD6F4"/>
+                  <Setter Property="Padding" Value="8,6"/>
+                  <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                  <Setter Property="Template">
+                    <Setter.Value>
+                      <ControlTemplate TargetType="ListViewItem">
+                        <Border x:Name="ItemBd" Background="{TemplateBinding Background}"
+                                CornerRadius="4" Padding="{TemplateBinding Padding}">
+                          <GridViewRowPresenter HorizontalAlignment="Stretch"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                          <Trigger Property="IsSelected" Value="True">
+                            <Setter TargetName="ItemBd" Property="Background" Value="#363655"/>
+                          </Trigger>
+                          <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="ItemBd" Property="Background" Value="#2D2D45"/>
+                          </Trigger>
+                        </ControlTemplate.Triggers>
+                      </ControlTemplate>
+                    </Setter.Value>
+                  </Setter>
+                </Style>
+              </ListView.Resources>
+              <ListView.View>
+                <GridView>
+                  <GridView.ColumnHeaderContainerStyle>
+                    <Style TargetType="GridViewColumnHeader">
+                      <Setter Property="Background" Value="Transparent"/>
+                      <Setter Property="Foreground" Value="#6C7086"/>
+                      <Setter Property="BorderThickness" Value="0"/>
+                      <Setter Property="Padding" Value="8,6"/>
+                      <Setter Property="FontSize" Value="10"/>
+                      <Setter Property="FontWeight" Value="SemiBold"/>
+                      <Setter Property="Cursor" Value="Arrow"/>
+                      <Setter Property="Template">
+                        <Setter.Value>
+                          <ControlTemplate TargetType="GridViewColumnHeader">
+                            <Border Background="Transparent" Padding="{TemplateBinding Padding}">
+                              <TextBlock Text="{TemplateBinding Content}"
+                                         Foreground="#6C7086" FontSize="10" FontWeight="SemiBold"/>
+                            </Border>
+                          </ControlTemplate>
+                        </Setter.Value>
+                      </Setter>
+                    </Style>
+                  </GridView.ColumnHeaderContainerStyle>
+                  <GridViewColumn Header="NAME" Width="230" DisplayMemberBinding="{Binding Name}"/>
+                  <GridViewColumn Header="NEXT RUN" Width="160" DisplayMemberBinding="{Binding NextRun}"/>
+                </GridView>
+              </ListView.View>
+            </ListView>
+          </Border>
+
+          <StackPanel Grid.Row="2" Orientation="Horizontal">
+            <Button x:Name="BtnAddSchedule" Content="+ Add"
+                    Style="{StaticResource SecondaryBtn}" Padding="16,9" Margin="0,0,8,0"/>
+            <Button x:Name="BtnRemoveSchedule" Content="- Remove"
+                    Style="{StaticResource DangerBtn}" Padding="16,9"/>
+          </StackPanel>
+        </Grid>
+      </TabItem>
+
+    </TabControl>
+  </Grid>
+</Window>

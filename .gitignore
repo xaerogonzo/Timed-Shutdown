@@ -1,0 +1,16 @@
+# Local agent/tooling config - contains absolute paths from the author's machine
+.claude/
+.tokensave/
+
+# Runtime output
+*.log
+*.log.bak
+
+# Editor / OS noise
+Thumbs.db
+desktop.ini
+*.swp
+*~
+
+# NOTE: dist/TimedShutdown.ps1 is deliberately COMMITTED.
+# It is the file users run, so the repo works as cloned without a build step.

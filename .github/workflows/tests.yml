@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # shell: powershell is Windows PowerShell 5.1 - the runtime the app targets,
+      # and STA by default, which the WPF markup tests require. Do not switch to
+      # pwsh: it resolves a different module path and is a different runtime.
+      - name: Install Pester (pinned)
+        shell: powershell
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force | Out-Null
+          # RequiredVersion, never MinimumVersion. Asking for "5.0 or newer" once
+          # installed Pester 6, whose breaking changes (root-level BeforeEach
+          # rejected) silently failed a whole test file.
+          Install-Module Pester -RequiredVersion 6.1.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Get-Module -ListAvailable Pester | Select-Object Version, Path | Format-Table -AutoSize
+
+      - name: Verify the bundle builds and keeps its BOM
+        shell: powershell
+        run: .\build.ps1
+
+      - name: Run tests
+        shell: powershell
+        run: .\tests\Invoke-Tests.ps1 -CI
