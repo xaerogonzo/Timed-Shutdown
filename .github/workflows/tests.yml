@@ -32,40 +32,64 @@ jobs:
         run: .\build.ps1
 
       # Non-blocking BY DESIGN, and staying that way. This is an older
-      # PowerShell scriptbase; the analyzer stylistic rules would demand
-      # rewriting code that works. The value here is the BASELINE count --
-      # once recorded, a later change can gate on "no new warnings" against
-      # it, which is the useful signal. "Make the analyzer green" is not.
+      # PowerShell scriptbase; the analyzer's stylistic rules would demand
+      # rewriting code that works. The value here is the BASELINE count -- once
+      # recorded, a later change can gate on "no new warnings" against it, which
+      # is the useful signal. "Make the analyzer green" is not.
       #
-      # The version is printed, not pinned, precisely because the baseline is
-      # only meaningful against a known analyzer version -- pin it here once
-      # CI has reported which one it resolved. Same lesson as the Pester
-      # RequiredVersion note above, applied one step later.
+      # Pinned, like Pester above, for the same reason: a baseline is meaningless
+      # against a moving analyzer version, because a new release can add rules and
+      # shift the count with no source change.
       - name: PSScriptAnalyzer (baseline, non-blocking)
         shell: powershell
         continue-on-error: true
         run: |
           [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
-          $v = (Get-Module -ListAvailable PSScriptAnalyzer |
-                 Sort-Object Version -Descending | Select-Object -First 1).Version
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Scope CurrentUser -Force -SkipPublisherCheck
+          Import-Module PSScriptAnalyzer
+          $v = (Get-Module PSScriptAnalyzer).Version
 
-          # dist\ is GENERATED from src\, so analysing it would double-count
-          # every finding. Sources and the build script only.
-          $found = @(
-              foreach ($p in "src", "tests", "build.ps1") {
-                  Invoke-ScriptAnalyzer -Path $p -Recurse
+          # PSDSC* is Desired State Configuration guidance -- irrelevant to a WPF
+          # tray utility, and 7 of its rules crash on tests\Source.Tests.ps1.
+          $exclude = @('PSDSC*')
+
+          # dist\ is GENERATED from src\, so analysing it would report every
+          # finding twice.
+          $targets = @(Get-ChildItem -Path src, tests -Recurse -Filter *.ps1 -File) +
+                     @(Get-Item build.ps1)
+
+          # Per FILE, not per path, and each one guarded. PSScriptAnalyzer 1.25.0
+          # throws "Reference Position should begin before start Position of Range"
+          # on tests\Source.Tests.ps1, and a single -Path over the tree loses the
+          # whole baseline to that one file. Analysing individually costs nothing
+          # and degrades to "20 of 21 files" instead of "no result at all".
+          $found = @(); $skipped = @()
+          foreach ($t in $targets) {
+              try {
+                  $found += @(Invoke-ScriptAnalyzer -Path $t.FullName -ExcludeRule $exclude -ErrorAction Stop)
+              } catch {
+                  $skipped += [pscustomobject]@{ File = $t.Name; Reason = $_.Exception.Message }
               }
-          )
+          }
 
           $found | Group-Object RuleName | Sort-Object Count -Descending |
               Select-Object Count, Name | Format-Table -AutoSize
 
-          $e = @($found | Where-Object Severity -eq "Error").Count
-          $w = @($found | Where-Object Severity -eq "Warning").Count
-          $i = @($found | Where-Object Severity -eq "Information").Count
+          # A step that cannot fail the build must SHOUT, or a crash in here looks
+          # identical to a clean run -- which is the exact silent-failure shape
+          # this project has already shipped three times. Annotations surface on
+          # the PR without anyone opening the log.
+          foreach ($s in $skipped) {
+              Write-Host "::warning file=$($s.File)::PSScriptAnalyzer $v could not analyse this file, so it is NOT in the baseline: $($s.Reason)"
+          }
+
+          $e = @($found | Where-Object Severity -eq 'Error').Count
+          $w = @($found | Where-Object Severity -eq 'Warning').Count
+          $i = @($found | Where-Object Severity -eq 'Information').Count
           Write-Host ""
-          Write-Host "PSScriptAnalyzer $v : $e errors, $w warnings, $i information"
+          Write-Host "PSScriptAnalyzer $v baseline: $e errors, $w warnings, $i information"
+          Write-Host "  files analysed: $($targets.Count - $skipped.Count) of $($targets.Count)"
+          if ($skipped) { Write-Host "  NOT analysed:   $(($skipped.File) -join ', ')" }
 
       - name: Run tests
         shell: powershell
