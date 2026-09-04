@@ -14,3 +14,7 @@ desktop.ini
 
 # NOTE: dist/TimedShutdown.ps1 is deliberately COMMITTED.
 # It is the file users run, so the repo works as cloned without a build step.
+
+
+# tokensave MCP binding (TokenSave Manager) — machine-local by choice
+.mcp.json
