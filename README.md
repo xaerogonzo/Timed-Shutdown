@@ -241,18 +241,30 @@ Run the tests. `-STA` is required — the markup tests instantiate WPF objects:
 powershell -NoProfile -ExecutionPolicy Bypass -STA -File tests\Invoke-Tests.ps1
 ```
 
-Needs Pester 5 or newer (Windows ships 3.4.0, which cannot run them). Install it
-once — the gallery currently serves 6.x:
+Needs Pester 6.1.0 (Windows ships 3.4.0, which cannot run them). Install it once:
 
 ```bash
-powershell -NoProfile -Command "Install-Module Pester -MinimumVersion 5.0 -Scope CurrentUser -Force -SkipPublisherCheck"
+powershell -NoProfile -Command "Install-Module Pester -RequiredVersion 6.1.0 -Scope CurrentUser -Force -SkipPublisherCheck"
 ```
+
+`-RequiredVersion`, not `-MinimumVersion`, and pinned to the version CI runs.
+Asking for "5.0 or newer" once installed a Pester whose breaking changes
+(root-level `BeforeEach` rejected) silently failed a whole test file — the suite
+reported green while a file had not loaded at all.
 
 If that fails with a `ShouldContinue` error, the NuGet provider is missing and
 PowerShellGet is trying to prompt for it. Bootstrap it first:
 
 ```bash
 powershell -NoProfile -Command "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force"
+```
+
+Note that `Install-Module` from **pwsh 7** writes to a different module path than
+Windows PowerShell 5.1 reads, and the tests run under 5.1. Check what 5.1 can
+actually see, not what your current shell reports:
+
+```bash
+powershell -NoProfile -Command "Get-Module -ListAvailable Pester | Select-Object Version, Path"
 ```
 
 ---

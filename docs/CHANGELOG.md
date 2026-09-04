@@ -1,5 +1,129 @@
 # Changelog
 
+## v2.3 - 2026-09-04
+
+Hardening. No new features: this release is four defects and the tests that
+should have caught them.
+
+Every one is the same shape — **something failed and said nothing**. That is the
+family that produced the v2.1 scheduled-task bug and the v2.0 guard churn, and
+three of the four modules involved had no tests at all.
+
+### Fixed
+
+**A failed snooze left a phantom timer.** `Add-SnoozeTime` cancels the OS timer
+and then arms a new one, so between those two calls there is no timer at all.
+Both exit codes were ignored, inside a `catch` that swallowed everything, and
+`pendingAction` was written regardless — so when the re-arm failed, state claimed
+a countdown that nothing was driving. The window ticked to zero and the machine
+stayed on. That is the v2.1 defect exactly: a timer with nothing behind it.
+
+The guard extension on the dispatcher tick calls straight into the same
+function, so this could happen with nobody pressing anything — a download
+finishing at the wrong moment was enough.
+
+On failure the honest end state is "nothing pending", because the original
+really is gone: state is cleared, the reason logged, and the caller told so it
+can say what happened rather than silently showing no timer.
+
+**A failed cancel reported success.** `Stop-TimedAction` removed the pending
+sleep/hibernate tasks with `-ErrorAction SilentlyContinue`, which made a genuine
+failure indistinguishable from a task that had already gone. The app cleared its
+state, the UI said the timer was cancelled, and the scheduled sleep fired anyway.
+
+Three outcomes are now distinct: the target was removed, there was nothing to
+remove (both success), and the removal was attempted and failed (reported, and
+deliberately leaving state intact — `pendingAction` mirrors something still live
+outside the app, so dropping the mirror would leave the user unable to see or
+retry the thing still counting down).
+
+`shutdown /a` returning 1116 — `ERROR_NO_SHUTDOWN_IN_PROGRESS` — counts as
+success for a cancel. The caller wants no pending shutdown and there is none.
+Treating it as failure would make cancelling a just-expired timer look broken,
+which is precisely when Cancel gets pressed.
+
+**The process guard ignored a typed `.exe`.** The Triggers tab strips it, on the
+grounds that "people type ffmpeg.exe out of habit". The guard on the Timers tab
+did not, and `Get-Process -Name` matches the process name *without* its
+extension — so `steam.exe` matched nothing and the guard silently never blocked,
+while the identical text one tab over worked. The user sets a guard, believes the
+shutdown is being held back until the game closes, and the machine powers off
+anyway. A guard that quietly does nothing is worse than no guard.
+
+**The log was never tab-separated.** The format string was single-quoted, and
+PowerShell processes escape sequences only inside double quotes, so `` `t `` was
+written as two literal characters between every field of every line ever logged:
+
+```
+2026-08-18T23:34:42.907-04:00`t2.2`tapp`tstart`tversion=2.2 ...
+```
+
+The doc comment directly above promised tab-separated fields "so the file greps
+and sorts cleanly". Nothing splitting on tabs could read a line of it.
+
+`Write-Log` also leaked an error record per tick on an unwritable path.
+`New-Item` reports a bad path as a *non-terminating* error, which `try/catch`
+does not catch, so it escaped to the error stream and only the .NET exception
+from the append that followed was ever caught — the `catch` was giving false
+comfort.
+
+### Changed
+
+- `$event` in `Core/Triggers.ps1` renamed to `$isEvent`. `$Event` is a
+  PowerShell automatic variable and `BASIC_INSTRUCTIONS.md` forbids the name, but
+  only the *parameter* form was enforced, so seven assignments sat in the trigger
+  engine unremarked. Nothing was misbehaving — they are plain locals — but the
+  name stops being harmless the moment that code is lifted into a
+  `Register-ObjectEvent -Action` scriptblock. The `Event` hashtable key is
+  unchanged; it is the documented evaluator contract.
+- `Resolve-ScheduleTime` takes an injectable `$Now`, and the task name moved to
+  `Get-ScheduledTaskName`. Neither decision could be tested before: the first
+  read the clock directly, so a "22:30 has already passed" test only held after
+  22:30; the second was buried inside a function that registers a real task.
+- `Core/Power.ps1` reaches `shutdown.exe`, `powercfg` and task removal through
+  seams. They return `@{ ExitCode; Output }` rather than leaving callers to read
+  the ambient `$LASTEXITCODE`, because a fake cannot set `$LASTEXITCODE` — a test
+  written against the ambient form reads whatever the last real command left
+  behind. You cannot make a real `shutdown.exe` fail on demand, and the failure
+  paths are the entire point.
+- The tray's Cancel had one `catch {}` around every step, so a failed timer
+  cancel silently skipped the trigger disarm too. The steps are independent now,
+  and keep-awake is released only when nothing is actually pending.
+- README pins Pester to `-RequiredVersion 6.1.0`, matching CI. It previously
+  advertised `-MinimumVersion 5.0` — the exact form CI's own comment warns
+  against, having once installed a Pester whose breaking changes silently failed
+  a whole test file.
+
+### Added
+
+- **`tests/Power.Tests.ps1`**, **`tests/Guards.Tests.ps1`**,
+  **`tests/Log.Tests.ps1`**, **`tests/Scheduler.Tests.ps1`** — four modules that
+  had no coverage whatsoever.
+- **Schema migration tests.** `docs/ARCHITECTURE.md` states both of
+  `Update-StateSchema`'s rules as safety invariants and nothing enforced either:
+  a v1 armed idle watch must migrate *disarmed*, and a file from a future schema
+  must be preserved and replaced with clean defaults, nothing armed. These are
+  the two places a state file can become an armed destructive action on a machine
+  whose owner never asked for one.
+- **An AST check for assignments to automatic variables**, complementing the
+  existing parameter check, with scope prefixes stripped so `$script:event` is
+  caught too.
+- **A non-blocking PSScriptAnalyzer baseline in CI**, pinned to 1.25.0. It stays
+  non-blocking: chasing a green analyzer on an older scriptbase means rewriting
+  code that works. The value is the baseline — 0 errors, 101 warnings — so a
+  later change can gate on *no new warnings*. It found two of the items above.
+
+  It analyses per file rather than per path, because 11 of the analyzer's 75
+  rules crash on `tests/Source.Tests.ps1`, and a single invocation over the tree
+  loses the whole baseline to that one file. Skips are reported as annotations:
+  a step that cannot fail the build has to shout, or a crash reads as a clean run.
+
+Every fix was verified by reverting it in isolation and confirming exactly the
+intended tests fail — a regression test that passes against the broken code is
+worth nothing.
+
+255 tests, all passing.
+
 ## v2.2 - 2026-08-18
 
 Event triggers, and the repository prepared for publication.

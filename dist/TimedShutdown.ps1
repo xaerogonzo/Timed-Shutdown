@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-04 13:53:03.
+    Built from src\ by build.ps1 on 2026-09-04 13:55:26.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -21,7 +21,7 @@
 # Shown in the header, the tray tooltip, and every log line. NOT in Window.Title:
 # the single-instance guard finds the existing window by exact title, so the
 # title has to stay stable across versions.
-$script:APP_VERSION = '2.2'
+$script:APP_VERSION = '2.3'
 
 # ═══ begin Interop.ps1 ═════════════════════════════════════════════
 <#
