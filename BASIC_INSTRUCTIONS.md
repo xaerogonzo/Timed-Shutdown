@@ -116,6 +116,12 @@ setup declared in a file's root block, and the whole file fails to load.
 objects, which need a single-threaded apartment. `pwsh` is MTA;
 `tests\Invoke-Tests.ps1` checks and tells you.
 
+**Check module availability with 5.1, not `pwsh`.** They read different
+`PSModulePath`s — `pwsh` does not include `Documents\WindowsPowerShell\Modules`
+— so a module the tests can see looks absent from `pwsh`, and one installed from
+`pwsh` lands where 5.1 will not find it. Always verify with
+`powershell -NoProfile -Command "Get-Module -ListAvailable <name>"`.
+
 **Keep `PART_SelectedContentHost` on the TabControl template's ContentPresenter.**
 The name is load-bearing, not decorative: `TabControl` looks it up to find its
 selected-content host, and `TabItemAutomationPeer` reaches tab content through
@@ -130,12 +136,47 @@ silently empty — no error at the call site. A `[string]$Args` parameter is wha
 broke every Sleep and Hibernate timer. `tests\Source.Tests.ps1` checks this
 across the whole tree with the AST.
 
-**Task Scheduler cmdlets fail non-terminating.** `Register-ScheduledTask` reports
-rejection as a non-terminating error, so `| Out-Null` without `-ErrorAction Stop`
-throws the failure away and the surrounding `try/catch` never fires — the app
-happily counts down a timer with no task behind it. Always pass
-`-ErrorAction Stop`. Relatedly, `-DeleteExpiredTaskAfter` is only accepted when
-the trigger sets an `EndBoundary`.
+**Do not assign to one either.** The parameter rule was enforced; the assignment
+form was not, so seven `$event = ...` locals sat in the trigger engine until
+PSScriptAnalyzer pointed at them. A local named `$event` is harmless in an
+ordinary function and stops being harmless the moment that code is lifted into a
+`Register-ObjectEvent -Action` scriptblock, where PowerShell binds `$Event`
+itself. Both forms are now AST-checked, scope prefixes stripped, so
+`$script:event` is caught as well.
+
+**A `try/catch` does not catch a non-terminating error.** This is the single
+most productive bug family in this codebase, and it is not limited to Task
+Scheduler. `Register-ScheduledTask` reports rejection as a non-terminating
+error, so `| Out-Null` without `-ErrorAction Stop` throws the failure away and
+the surrounding `try/catch` never fires — the app counts down a timer with no
+task behind it. `New-Item` does the same for a bad path, which meant
+`Write-Log`'s catch was decorative and an unwritable log emitted an error record
+on every dispatcher tick. Any cmdlet inside a `try` that you rely on the `catch`
+for needs `-ErrorAction Stop`. Relatedly, `-DeleteExpiredTaskAfter` is only
+accepted when the trigger sets an `EndBoundary`.
+
+**Never report success for something that failed.** `-ErrorAction
+SilentlyContinue` on a cancel made "the task was removed" and "removing it
+failed" indistinguishable, so the UI said the timer was cancelled and the
+scheduled sleep fired anyway. "Cancelled" is a claim the user acts on by walking
+away from the machine. Where an operation can partly fail, decide what the world
+should look like afterwards and test *that*, not the return value —
+`Add-SnoozeTime` aborts the old timer before arming the new one, so a failed
+re-arm has already destroyed what it was extending, and the only honest end
+state is "nothing pending".
+
+**Escape sequences only work in double-quoted strings.** `'{0}`t{1}'` writes a
+literal backtick and a `t`; `"{0}`t{1}"` writes a tab. Every log line the app
+ever produced was affected, and the doc comment directly above the bug promised
+tab-separated fields.
+
+**External commands in `Core\Power.ps1` go through the seams.** `shutdown.exe`,
+`powercfg` and task removal are reached via `$script:InvokeShutdownExe` and
+friends, swapped in tests by `Set-PowerCommandSeam`. They return
+`@{ ExitCode; Output }` rather than leaving callers to read `$LASTEXITCODE`: a
+fake cannot set `$LASTEXITCODE`, so a test written against the ambient form
+silently reads whatever the last real command left behind. You cannot make a real
+`shutdown.exe` fail on demand, and the failure paths are the ones worth testing.
 
 **Keep Quick Actions outside the scrolling region.** ACTIVE TIMER and QUICK
 ACTIONS once shared a `StackPanel`, which neither clips nor scrolls; the growing
