@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-04 13:38:16.
+    Built from src\ by build.ps1 on 2026-09-04 13:40:44.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -687,10 +687,29 @@ function New-PendingTask ([string]$Name, [string]$Exe, [string]$Arguments, [date
     already passed, so it rolls to tomorrow -- matching what ConvertTo-Seconds
     does for the timer box. Daily and weekly triggers roll over on their own.
 #>
-function Resolve-ScheduleTime ([string]$AtTime, [string]$Recurrence) {
+function Resolve-ScheduleTime ([string]$AtTime, [string]$Recurrence, [datetime]$Now = (Get-Date)) {
     $pt = [datetime]::ParseExact($AtTime, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
-    if ($Recurrence -eq 'once' -and $pt -le (Get-Date)) { $pt = $pt.AddDays(1) }
+    if ($Recurrence -eq 'once' -and $pt -le $Now) { $pt = $pt.AddDays(1) }
     return $pt
+}
+
+<#
+    The task name, built separately so the rollover rule above and the naming
+    rule here can both be tested without registering anything.
+
+    NB the name is the ONLY record of what a schedule does -- the Scheduled tab
+    reads it back and shows it raw. That is why it encodes action, recurrence,
+    days and time.
+#>
+function Get-ScheduledTaskName {
+    param(
+        [string]   $ActionType,
+        [string]   $Recurrence,
+        [string]   $AtTime,
+        [string[]] $DaysOfWeek = @()
+    )
+    $dayStr = if ($DaysOfWeek.Count -gt 0) { '_' + ($DaysOfWeek -join '') } else { '' }
+    return "TS_${ActionType}_${Recurrence}${dayStr}_$($AtTime -replace ':','')"
 }
 
 function Add-ScheduledAction ([string]$ActionType, [string]$Recurrence, [string]$AtTime, [string[]]$DaysOfWeek = @()) {
@@ -707,8 +726,7 @@ function Add-ScheduledAction ([string]$ActionType, [string]$Recurrence, [string]
         'daily'  { New-ScheduledTaskTrigger -Daily  -At $pt }
         'weekly' { New-ScheduledTaskTrigger -Weekly -At $pt -DaysOfWeek $DaysOfWeek }
     }
-    $dayStr = if ($DaysOfWeek.Count -gt 0) { '_' + ($DaysOfWeek -join '') } else { '' }
-    $name   = "TS_${ActionType}_${Recurrence}${dayStr}_$($AtTime -replace ':','')"
+    $name   = Get-ScheduledTaskName $ActionType $Recurrence $AtTime $DaysOfWeek
     $pr     = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
     $set    = New-ScheduledTaskSettingsSet -ExecutionTimeLimit '00:05:00'
     Register-ScheduledTask -TaskName $name -TaskPath "$($script:TASK_FOLDER)\" `
