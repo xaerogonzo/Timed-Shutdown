@@ -21,6 +21,34 @@ BeforeAll {
         'shellid','stacktrace','consolefilename','psculture','psuiculture','psversiontable'
     )
 
+    <#
+        Assignments whose target is an automatic variable.
+
+        The scope prefix is stripped before comparing, so `$script:event = ...`
+        is caught too -- writing to a scoped variable that shares a name with an
+        automatic is the same trap wearing a hat.
+    #>
+    function Get-AutomaticVariableAssignments ([string]$Path) {
+        $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+        $out = @()
+        foreach ($a in $ast.FindAll({
+                    $args[0] -is [System.Management.Automation.Language.AssignmentStatementAst] }, $true)) {
+            $left = $a.Left
+            if ($left -isnot [System.Management.Automation.Language.VariableExpressionAst]) { continue }
+
+            $name = $left.VariablePath.UserPath
+            $leaf = ($name -split ':')[-1]          # drop any script:/global:/local: prefix
+            if ($script:ReservedNames -contains $leaf.ToLower()) {
+                $out += [PSCustomObject]@{
+                    File     = Split-Path $Path -Leaf
+                    Variable = $name
+                    Line     = $a.Extent.StartLineNumber
+                }
+            }
+        }
+        return $out
+    }
+
     function Get-FunctionParameters ([string]$Path) {
         $errors = $null
         $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$errors)
@@ -133,5 +161,38 @@ Describe 'Source encoding' {
             }
         )
         $offenders -join ', ' | Should -BeNullOrEmpty
+    }
+}
+
+Describe 'Variable assignments' {
+
+    <#
+        The parameter rule above catches `[string]$Args` -- a parameter that
+        silently arrives empty. This catches the other half of the same mistake:
+        ASSIGNING to an automatic variable.
+
+        BASIC_INSTRUCTIONS.md forbids these names outright, and the v2.2
+        changelog calls a $Event parameter "exactly the class of bug that broke
+        Sleep and Hibernate in v2.1" -- but only the parameter form was ever
+        enforced, so seven `$event = ...` assignments sat in the trigger engine,
+        the most safety-critical module in the project, without complaint.
+
+        A local named $event is harmless in an ordinary function. It stops being
+        harmless the moment that code is lifted into a Register-ObjectEvent
+        -Action scriptblock, where $Event is bound by PowerShell itself -- and
+        this app already runs WinForms event handlers. The rule is cheap; finding
+        out the hard way is not.
+
+        Found by PSScriptAnalyzer's PSAvoidAssignmentToAutomaticVariable, which
+        the CI baseline step surfaced.
+    #>
+    It 'no assignment targets a PowerShell automatic variable' {
+        $offenders = @(
+            Get-ChildItem -Path $script:srcDir -Recurse -Filter '*.ps1' -File | ForEach-Object {
+                Get-AutomaticVariableAssignments $_.FullName
+            }
+        )
+        ($offenders | ForEach-Object { "$($_.File):$($_.Line) -> `$$($_.Variable)" }) -join '; ' |
+            Should -BeNullOrEmpty
     }
 }
