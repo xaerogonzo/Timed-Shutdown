@@ -42,9 +42,12 @@ $mnuCancel.add_Click({
     # reporting success, and that has to reach the user. The whole point is that
     # nobody should walk away from the machine believing a shutdown was called
     # off when it was not.
-    $problem = $null
-    try { Stop-TimedAction }   catch { $problem = $_.Exception.Message }
-    try { Stop-Trigger 'tray' } catch {}
+    $problems = @()
+    try { Stop-TimedAction }    catch { $problems += "timer: $($_.Exception.Message)" }
+
+    # Not a bare catch{}: a disarm that failed leaves the trigger ARMED and still
+    # able to fire, which is precisely the thing the user just asked to stop.
+    try { Stop-Trigger 'tray' } catch { $problems += "trigger: $($_.Exception.Message)" }
 
     # Only release the keep-awake request if nothing is actually pending; a
     # failed cancel means something still is.
@@ -53,7 +56,9 @@ $mnuCancel.add_Click({
     Refresh-ActiveTimer
     Update-TriggerDisplay
 
-    if ($problem) { Show-ErrorBox "Could not cancel the pending action:`n`n$problem" }
+    if ($problems.Count -gt 0) {
+        Show-ErrorBox ("Could not fully cancel:`n`n" + ($problems -join "`n"))
+    }
 })
 
 $mnuLog.add_Click({
