@@ -288,9 +288,31 @@ $BtnCancel.Add_Click({
     catch { Show-ErrorBox "Failed to cancel: $_" }
 })
 
-$BtnSnooze15.Add_Click({ Add-SnoozeTime 900;  Refresh-ActiveTimer })
-$BtnSnooze30.Add_Click({ Add-SnoozeTime 1800; Refresh-ActiveTimer })
-$BtnSnooze60.Add_Click({ Add-SnoozeTime 3600; Refresh-ActiveTimer })
+<#
+    Add-SnoozeTime returns $false when the re-arm failed. By then the original
+    timer is already cancelled and the pending state cleared, so the panel simply
+    disappears -- which on its own looks exactly like a successful cancel. Say
+    what actually happened instead.
+
+    The Get-TrackedAction check first separates that from the harmless race where
+    the timer expired between the panel rendering and the click landing; there is
+    nothing to report in that case.
+#>
+function Invoke-Snooze ([int]$ExtraSec) {
+    if (-not (Get-TrackedAction)) { Refresh-ActiveTimer; return }
+
+    $extended = Add-SnoozeTime $ExtraSec
+    Refresh-ActiveTimer
+    if (-not $extended) {
+        Show-ErrorBox ("Could not extend the timer.`n`n" +
+                       "The pending action was cancelled and could not be re-armed, " +
+                       "so nothing is scheduled now. See the log for details.")
+    }
+}
+
+$BtnSnooze15.Add_Click({ Invoke-Snooze 900  })
+$BtnSnooze30.Add_Click({ Invoke-Snooze 1800 })
+$BtnSnooze60.Add_Click({ Invoke-Snooze 3600 })
 
 $BtnMonitorOff.Add_Click({ Invoke-MonitorOff })
 $BtnLockScreen.Add_Click({ Invoke-LockScreen })

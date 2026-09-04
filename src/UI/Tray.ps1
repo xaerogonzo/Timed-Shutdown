@@ -34,13 +34,26 @@ $mnuOpen.add_Click({ $window.Show(); $window.WindowState = 'Normal'; $window.Act
 $trayIcon.add_DoubleClick({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })
 
 $mnuCancel.add_Click({
-    try {
-        Stop-TimedAction
-        Stop-Trigger 'tray'
-        Disable-KeepAwake
-        Refresh-ActiveTimer
-        Update-TriggerDisplay
-    } catch {}
+    # The steps are independent: a failed timer cancel must not stop the trigger
+    # being disarmed, and one shared catch{} previously meant it did -- while
+    # also hiding the failure entirely.
+    #
+    # Stop-TimedAction now throws when a cancel genuinely failed rather than
+    # reporting success, and that has to reach the user. The whole point is that
+    # nobody should walk away from the machine believing a shutdown was called
+    # off when it was not.
+    $problem = $null
+    try { Stop-TimedAction }   catch { $problem = $_.Exception.Message }
+    try { Stop-Trigger 'tray' } catch {}
+
+    # Only release the keep-awake request if nothing is actually pending; a
+    # failed cancel means something still is.
+    if (-not (Get-TrackedAction)) { Disable-KeepAwake }
+
+    Refresh-ActiveTimer
+    Update-TriggerDisplay
+
+    if ($problem) { Show-ErrorBox "Could not cancel the pending action:`n`n$problem" }
 })
 
 $mnuLog.add_Click({
