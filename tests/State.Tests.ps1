@@ -139,3 +139,201 @@ Describe 'Initialize-StateStore' {
         Test-Path $legacy | Should -BeTrue
     }
 }
+
+<#
+    Schema migration.
+
+    docs/ARCHITECTURE.md states both of these rules as safety invariants, and
+    until now nothing enforced either. They are the two places where a state file
+    can turn into an armed destructive action on a machine whose owner never
+    asked for one.
+#>
+Describe 'Get-StateSchemaVersion' {
+
+    BeforeEach {
+        $sandbox = New-Sandbox
+        Set-StateFilePath (Join-Path $sandbox 'state.json')
+    }
+    AfterEach { Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reads 0 for no state at all' {
+        Get-StateSchemaVersion $null | Should -Be 0
+    }
+
+    # v1 predates the field and instead wrote a `version` of '1.0', which nothing
+    # ever read back. Absent therefore means v1, not "unknown".
+    It 'reads the legacy version field as v1' {
+        Set-Content -Path (Join-Path $sandbox 'state.json') `
+            -Value '{"version":"1.0","idleWatch":{"active":true}}' -Encoding UTF8
+        Get-StateSchemaVersion (Read-State) | Should -Be 1
+    }
+
+    It 'reads a file with no version marker at all as v1' {
+        Set-Content -Path (Join-Path $sandbox 'state.json') `
+            -Value '{"idleWatch":{"active":true}}' -Encoding UTF8
+        Get-StateSchemaVersion (Read-State) | Should -Be 1
+    }
+
+    It 'reads an explicit schema version' {
+        Write-State @{ pendingAction = @{ type = 'null' } }
+        Get-StateSchemaVersion (Read-State) | Should -Be 2
+    }
+}
+
+Describe 'Update-StateSchema - v1 to v2' {
+
+    BeforeEach {
+        $sandbox   = New-Sandbox
+        $stateFile = Join-Path $sandbox 'state.json'
+        Set-StateFilePath $stateFile
+    }
+    AfterEach { Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reports that it migrated' {
+        Set-Content -Path $stateFile -Encoding UTF8 `
+            -Value '{"version":"1.0","idleWatch":{"active":false,"thresholdSec":1800,"type":"sleep"}}'
+        Update-StateSchema | Should -BeTrue
+    }
+
+    <#
+        THE invariant. A v1 armed idle watch becomes a v2 idle trigger that is
+        DISARMED.
+
+        The v2 trigger engine is not the v1 one -- different priming, different
+        grace behaviour, different abort rules. Carrying "armed" across that
+        boundary would mean an upgrade silently re-consented, on the owner's
+        behalf, to a destructive action configured under rules that no longer
+        exist. They have to arm it again, having seen the new UI.
+    #>
+    It 'migrates an ARMED v1 idle watch to a DISARMED v2 trigger' {
+        Set-Content -Path $stateFile -Encoding UTF8 `
+            -Value '{"version":"1.0","idleWatch":{"active":true,"thresholdSec":1800,"type":"shutdown"}}'
+        Update-StateSchema | Out-Null
+
+        $s = Read-State
+        $s.trigger       | Should -Not -BeNullOrEmpty
+        $s.trigger.armed | Should -BeFalse
+    }
+
+    It 'carries the configured threshold and action across' {
+        Set-Content -Path $stateFile -Encoding UTF8 `
+            -Value '{"version":"1.0","idleWatch":{"active":true,"thresholdSec":2700,"type":"hibernate"}}'
+        Update-StateSchema | Out-Null
+
+        $s = Read-State
+        $s.trigger.kind                | Should -Be 'idle'
+        $s.trigger.action              | Should -Be 'hibernate'
+        $s.trigger.config.thresholdSec | Should -Be 2700
+    }
+
+    It 'falls back to a default threshold when v1 recorded none' {
+        Set-Content -Path $stateFile -Encoding UTF8 -Value '{"version":"1.0","idleWatch":{"active":false}}'
+        Update-StateSchema | Out-Null
+        (Read-State).trigger.config.thresholdSec | Should -Be 1800
+    }
+
+    It 'migrates a file with no idleWatch at all' {
+        Set-Content -Path $stateFile -Encoding UTF8 -Value '{"version":"1.0"}'
+        Update-StateSchema | Out-Null
+
+        $s = Read-State
+        $s.trigger.armed | Should -BeFalse
+        $s.trigger.kind  | Should -Be 'idle'
+    }
+
+    It 'stamps the new schema version' {
+        Set-Content -Path $stateFile -Encoding UTF8 -Value '{"version":"1.0","idleWatch":{"active":true}}'
+        Update-StateSchema | Out-Null
+        Get-StateSchemaVersion (Read-State) | Should -Be 2
+    }
+
+    <#
+        Both v1 fields are retired rather than left lying around. Leaving
+        `version` beside `stateSchemaVersion` would mean two fields that each
+        look like "the version", and a future reader would have to guess which
+        one governs.
+    #>
+    It 'retires the v1 idleWatch and version fields' {
+        Set-Content -Path $stateFile -Encoding UTF8 `
+            -Value '{"version":"1.0","idleWatch":{"active":true,"thresholdSec":1800}}'
+        Update-StateSchema | Out-Null
+
+        $s = Read-State
+        $s.idleWatch | Should -BeNullOrEmpty
+        $s.version   | Should -BeNullOrEmpty
+    }
+
+    It 'is a no-op the second time' {
+        Set-Content -Path $stateFile -Encoding UTF8 -Value '{"version":"1.0","idleWatch":{"active":true}}'
+        Update-StateSchema | Should -BeTrue
+        Update-StateSchema | Should -BeFalse
+    }
+
+    It 'does nothing when there is no state file' {
+        Update-StateSchema | Should -BeFalse
+    }
+}
+
+Describe 'Update-StateSchema - a file from the future' {
+
+    BeforeEach {
+        $sandbox   = New-Sandbox
+        $stateFile = Join-Path $sandbox 'state.json'
+        Set-StateFilePath $stateFile
+
+        Set-Content -Path $stateFile -Encoding UTF8 -Value (@{
+            stateSchemaVersion = 99
+            trigger            = @{ kind = 'quantum'; action = 'shutdown'; armed = $true }
+            somethingNew       = @{ nested = 'value' }
+        } | ConvertTo-Json -Depth 5)
+    }
+    AfterEach { Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue }
+
+    It 'reports that it changed something' {
+        Update-StateSchema | Should -BeTrue
+    }
+
+    <#
+        Reinterpreting a newer file as the current schema would mean guessing at
+        fields written by a build that does not exist yet. It is preserved
+        instead -- the user may well go back to that build, and this stops being
+        hypothetical the moment anyone copies a state file between machines.
+    #>
+    It 'preserves the original alongside, named for its schema' {
+        Update-StateSchema | Out-Null
+        Test-Path "$stateFile.v99.bak" | Should -BeTrue
+
+        $preserved = Get-Content "$stateFile.v99.bak" -Raw | ConvertFrom-Json
+        $preserved.stateSchemaVersion  | Should -Be 99
+        $preserved.somethingNew.nested | Should -Be 'value'
+    }
+
+    <#
+        The safety half: it starts from clean defaults with NOTHING armed. That
+        future file carried an armed trigger of a kind this build has never heard
+        of; honouring it would arm a destructive action whose firing rules cannot
+        be evaluated at all.
+    #>
+    It 'starts clean with nothing armed' {
+        Update-StateSchema | Out-Null
+
+        $s = Read-State
+        $s.trigger.armed | Should -BeFalse
+        $s.trigger.kind  | Should -Be 'idle'
+    }
+
+    It 'drops the unrecognised fields from the live file' {
+        Update-StateSchema | Out-Null
+        (Read-State).somethingNew | Should -BeNullOrEmpty
+    }
+
+    It 'stamps the version this build actually supports' {
+        Update-StateSchema | Out-Null
+        Get-StateSchemaVersion (Read-State) | Should -Be 2
+    }
+
+    It 'settles down after one pass' {
+        Update-StateSchema | Should -BeTrue
+        Update-StateSchema | Should -BeFalse
+    }
+}
