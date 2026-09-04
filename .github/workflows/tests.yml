@@ -31,6 +31,42 @@ jobs:
         shell: powershell
         run: .\build.ps1
 
+      # Non-blocking BY DESIGN, and staying that way. This is an older
+      # PowerShell scriptbase; the analyzer stylistic rules would demand
+      # rewriting code that works. The value here is the BASELINE count --
+      # once recorded, a later change can gate on "no new warnings" against
+      # it, which is the useful signal. "Make the analyzer green" is not.
+      #
+      # The version is printed, not pinned, precisely because the baseline is
+      # only meaningful against a known analyzer version -- pin it here once
+      # CI has reported which one it resolved. Same lesson as the Pester
+      # RequiredVersion note above, applied one step later.
+      - name: PSScriptAnalyzer (baseline, non-blocking)
+        shell: powershell
+        continue-on-error: true
+        run: |
+          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force -SkipPublisherCheck
+          $v = (Get-Module -ListAvailable PSScriptAnalyzer |
+                 Sort-Object Version -Descending | Select-Object -First 1).Version
+
+          # dist\ is GENERATED from src\, so analysing it would double-count
+          # every finding. Sources and the build script only.
+          $found = @(
+              foreach ($p in "src", "tests", "build.ps1") {
+                  Invoke-ScriptAnalyzer -Path $p -Recurse
+              }
+          )
+
+          $found | Group-Object RuleName | Sort-Object Count -Descending |
+              Select-Object Count, Name | Format-Table -AutoSize
+
+          $e = @($found | Where-Object Severity -eq "Error").Count
+          $w = @($found | Where-Object Severity -eq "Warning").Count
+          $i = @($found | Where-Object Severity -eq "Information").Count
+          Write-Host ""
+          Write-Host "PSScriptAnalyzer $v : $e errors, $w warnings, $i information"
+
       - name: Run tests
         shell: powershell
         run: .\tests\Invoke-Tests.ps1 -CI
