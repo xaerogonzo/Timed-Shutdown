@@ -180,16 +180,22 @@ function Test-TriggerProcess ($Config, $Eval, $Context) {
     }
 
     # EVENT is an edge: something that WAS up is now down.
-    $event = $false
+    #
+    # Named $isEvent, not $event: $Event is a PowerShell automatic variable, bound
+    # inside Register-ObjectEvent -Action scriptblocks. Assigning it here is
+    # harmless today because these are plain locals in ordinary functions -- but
+    # BASIC_INSTRUCTIONS.md forbids the name outright, and this is the module
+    # where a surprise would cost the most. tests/Source.Tests.ps1 now enforces it.
+    $isEvent = $false
     if ($primed) {
         if ($mode -eq 'all') {
             $allDown   = @($names | Where-Object { $counts[$_] -gt 0 }).Count -eq 0
             $anyPrevUp = @($names | Where-Object { [int]$Eval['Prev'][$_] -gt 0 }).Count -gt 0
-            $event = $allDown -and $anyPrevUp
+            $isEvent = $allDown -and $anyPrevUp
         } else {
             foreach ($n in $names) {
                 if ($Eval['Observed'][$n] -and [int]$Eval['Prev'][$n] -gt 0 -and $counts[$n] -eq 0) {
-                    $event = $true; break
+                    $isEvent = $true; break
                 }
             }
         }
@@ -211,7 +217,7 @@ function Test-TriggerProcess ($Config, $Eval, $Context) {
               else                      { "waiting for $($names -join ', ') to start" }
 
     $Eval['Prev'] = $counts
-    return @{ Event = $event; Reset = $reset; Primed = $primed; Status = $status }
+    return @{ Event = $isEvent; Reset = $reset; Primed = $primed; Status = $status }
 }
 
 <#
@@ -265,14 +271,14 @@ function Test-TriggerDownloads ($Config, $Eval, $Context) {
 
     $primed   = [bool]$Eval['ActivitySeen']
     $quietFor = if ($Eval['LastActivityTks']) { ($Context.NowTicks - $Eval['LastActivityTks']) / 1000 } else { 0 }
-    $event    = $primed -and $partials.Count -eq 0 -and $quietFor -ge $settleSec
+    $isEvent  = $primed -and $partials.Count -eq 0 -and $quietFor -ge $settleSec
     $reset    = [bool]$Eval['CooldownActivity']
 
     $status = if ($partials.Count -gt 0) { "downloading - $($partials.Count) partial file(s)" }
               elseif (-not $primed)      { 'waiting for download activity' }
               else                       { "settling - quiet $([int]$quietFor)s of ${settleSec}s" }
 
-    return @{ Event = $event; Reset = $reset; Primed = $primed; Status = $status }
+    return @{ Event = $isEvent; Reset = $reset; Primed = $primed; Status = $status }
 }
 
 <#
@@ -298,15 +304,15 @@ function Test-TriggerSignal ($Config, $Eval, $Context) {
                   Status = "signal already present - will act once armed" }
     }
 
-    $primed = [bool]$Eval['SeenAbsent']
-    $event  = $false
-    $status = if ($exists) { "signal present: $path" } else { "waiting for $path" }
+    $primed  = [bool]$Eval['SeenAbsent']
+    $isEvent = $false
+    $status  = if ($exists) { "signal present: $path" } else { "waiting for $path" }
 
     if ($primed -and $exists -and -not $Context.Passive) {
         try {
             Remove-Item -LiteralPath $path -Force -ErrorAction Stop
-            $event  = $true
-            $status = 'signal received'
+            $isEvent = $true
+            $status  = 'signal received'
             $Eval['SeenAbsent']  = $false
             $Eval['DeleteError'] = $null
         } catch {
@@ -318,7 +324,7 @@ function Test-TriggerSignal ($Config, $Eval, $Context) {
     # Consuming the file already returned the world to its re-armable baseline,
     # and firing again requires a fresh absent->present edge.
     $reset = -not (Test-Path -LiteralPath $path)
-    return @{ Event = $event; Reset = $reset; Primed = $primed; Status = $status }
+    return @{ Event = $isEvent; Reset = $reset; Primed = $primed; Status = $status }
 }
 
 <#
@@ -366,7 +372,7 @@ function Test-TriggerResource ($Config, $Eval, $Context) {
 
     $primed  = [bool]$Eval['SeenAbove']
     $heldFor = if ($Eval['BelowSince']) { ($Context.NowTicks - $Eval['BelowSince']) / 1000 } else { 0 }
-    $event   = $primed -and $below -and $heldFor -ge $sustainSec
+    $isEvent = $primed -and $below -and $heldFor -ge $sustainSec
     $reset   = [bool]$Eval['CooldownAbove']
 
     $parts = @()
@@ -376,7 +382,7 @@ function Test-TriggerResource ($Config, $Eval, $Context) {
               elseif ($below)   { "quiet $([int]$heldFor)s of ${sustainSec}s - $($parts -join ', ')" }
               else              { "busy - $($parts -join ', ')" }
 
-    return @{ Event = $event; Reset = $reset; Primed = $primed; Status = $status }
+    return @{ Event = $isEvent; Reset = $reset; Primed = $primed; Status = $status }
 }
 
 <#
