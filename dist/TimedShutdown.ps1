@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-04 13:34:08.
+    Built from src\ by build.ps1 on 2026-09-04 13:38:16.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -778,14 +778,31 @@ function Get-GuardBlockReason {
         [double] $CurrentKbps   = 0,
         [double] $ThresholdKbps = 0,
         [bool]   $ProcessGuard  = $false,
-        [string] $ProcessName   = ''
+        [string] $ProcessName   = '',
+        # Same seam idiom as New-TriggerContext's GetProcessCount in
+        # Core/Triggers.ps1: the real lookup is the default and tests swap it, so
+        # guard behaviour can be exercised without depending on which processes
+        # happen to be running on the machine executing the suite.
+        [scriptblock] $GetProcessCount = $null
     )
+    if (-not $GetProcessCount) {
+        $GetProcessCount = { param($name) @(Get-Process -Name $name -ErrorAction SilentlyContinue).Count }
+    }
+
     if ($NetworkGuard -and $CurrentKbps -gt $ThresholdKbps) {
         return "network active ($([math]::Round($CurrentKbps, 1)) KB/s)"
     }
     if ($ProcessGuard) {
-        $p = $ProcessName.Trim()
-        if ($p -ne '' -and (Get-Process -Name $p -ErrorAction SilentlyContinue)) {
+        # Strip a typed .exe, exactly as the Triggers tab already does in
+        # UI/MainWindow.ps1 -- "people type ffmpeg.exe out of habit".
+        #
+        # Get-Process -Name matches the process name WITHOUT its extension, so
+        # "steam.exe" matched nothing and this guard silently never blocked. The
+        # identical text typed one tab over DID work, because that path strips it.
+        # A guard that quietly does nothing is worse than no guard: the user
+        # believes the shutdown is being held back.
+        $p = ($ProcessName.Trim() -replace '\.exe$', '')
+        if ($p -ne '' -and (& $GetProcessCount $p) -gt 0) {
             return "process '$p' is running"
         }
     }
@@ -798,10 +815,12 @@ function Test-GuardsAllClear {
         [double] $CurrentKbps   = 0,
         [double] $ThresholdKbps = 0,
         [bool]   $ProcessGuard  = $false,
-        [string] $ProcessName   = ''
+        [string] $ProcessName   = '',
+        [scriptblock] $GetProcessCount = $null
     )
     return $null -eq (Get-GuardBlockReason -NetworkGuard $NetworkGuard -CurrentKbps $CurrentKbps `
-                        -ThresholdKbps $ThresholdKbps -ProcessGuard $ProcessGuard -ProcessName $ProcessName)
+                        -ThresholdKbps $ThresholdKbps -ProcessGuard $ProcessGuard -ProcessName $ProcessName `
+                        -GetProcessCount $GetProcessCount)
 }
 
 # ── CPU ───────────────────────────────────────────────────────────────────────
