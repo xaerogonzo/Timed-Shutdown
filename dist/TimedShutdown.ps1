@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-08-18 23:49:28.
+    Built from src\ by build.ps1 on 2026-09-04 13:34:08.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -261,11 +261,26 @@ function Invoke-LogRollover {
 function Write-Log ([string]$Category, [string]$EventName, [string]$Detail = '') {
     try {
         $dir = Split-Path $script:LOG_FILE -Parent
-        if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        # -ErrorAction Stop is load-bearing, for the same reason it is on every
+        # Register-ScheduledTask call: New-Item reports a bad path as a
+        # NON-terminating error, which try/catch does not catch. Without it the
+        # failure escaped into the error stream and execution carried on to the
+        # append below -- so the catch here was giving false comfort, and an
+        # unwritable log path meant an error record every single dispatcher tick.
+        if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+        }
         Invoke-LogRollover
 
         $version = if ($script:APP_VERSION) { $script:APP_VERSION } else { '?' }
-        $line = '{0}`t{1}`t{2}`t{3}`t{4}' -f `
+
+        # DOUBLE-quoted, and that is the whole point: PowerShell processes escape
+        # sequences only inside double quotes. This literal was single-quoted
+        # until v2.3, so `t was not a tab -- it was the two characters ` and t,
+        # written between every field of every line ever logged. The "fields are
+        # tab-separated" promise above was simply false, and nothing splitting on
+        # tabs could read the file.
+        $line = "{0}`t{1}`t{2}`t{3}`t{4}" -f `
             (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fffzzz'), $version, $Category, $EventName, $Detail
 
         # Append with an explicit UTF-8 (no BOM on append) writer rather than
