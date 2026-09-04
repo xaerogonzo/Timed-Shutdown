@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-04 13:40:44.
+    Built from src\ by build.ps1 on 2026-09-04 13:47:34.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -1543,6 +1543,84 @@ function Complete-TriggerExecution {
 
 $script:keepAwakeHeld = $false
 
+# ── Test seams ────────────────────────────────────────────────────────────────
+<#
+    The external commands this module drives, behind swappable scriptblocks.
+
+    Core/Triggers.ps1 injects its seam through the per-tick $Context; the
+    functions here are called directly, so the seam is script-scope instead --
+    the same shape as Set-StateFilePath and Set-LogFilePath.
+
+    Each returns @{ ExitCode; Output } rather than leaving the caller to read the
+    ambient $LASTEXITCODE. That is not tidiness: a fake cannot set $LASTEXITCODE,
+    so a test written against the ambient form would quietly be reading whatever
+    the last REAL command in the session happened to leave behind, and would pass
+    or fail for reasons unrelated to the code under test.
+#>
+$script:DefaultInvokeShutdownExe = {
+    param([string[]]$Arguments)
+    $out = & shutdown.exe @Arguments 2>&1
+    return @{ ExitCode = $LASTEXITCODE; Output = ($out | Out-String).Trim() }
+}
+
+$script:DefaultInvokePowercfg = {
+    param([string[]]$Arguments)
+    $out = & powercfg @Arguments 2>&1
+    return @{ ExitCode = $LASTEXITCODE; Output = ($out | Out-String) }
+}
+
+<#
+    Removes a one-shot backing task, returning $true if one was actually there.
+
+    Absent is SUCCESS -- the caller wants it gone and it is gone. Anything else
+    throws, so a genuine failure can never be mistaken for a completed cancel.
+    The old code used -ErrorAction SilentlyContinue, which made those two
+    outcomes indistinguishable.
+#>
+$script:DefaultRemovePendingTask = {
+    param([string]$Name, [string]$TaskPath)
+    $existing = Get-ScheduledTask -TaskName $Name -TaskPath $TaskPath -ErrorAction SilentlyContinue
+    if (-not $existing) { return $false }
+    Unregister-ScheduledTask -TaskName $Name -TaskPath $TaskPath -Confirm:$false -ErrorAction Stop
+    return $true
+}
+
+$script:InvokeShutdownExe = $script:DefaultInvokeShutdownExe
+$script:InvokePowercfg    = $script:DefaultInvokePowercfg
+$script:RemovePendingTask = $script:DefaultRemovePendingTask
+
+function Set-PowerCommandSeam {
+    param(
+        [scriptblock] $ShutdownExe       = $null,
+        [scriptblock] $Powercfg          = $null,
+        [scriptblock] $RemovePendingTask = $null
+    )
+    if ($ShutdownExe)       { $script:InvokeShutdownExe = $ShutdownExe }
+    if ($Powercfg)          { $script:InvokePowercfg    = $Powercfg }
+    if ($RemovePendingTask) { $script:RemovePendingTask = $RemovePendingTask }
+}
+
+function Reset-PowerCommandSeam {
+    $script:InvokeShutdownExe = $script:DefaultInvokeShutdownExe
+    $script:InvokePowercfg    = $script:DefaultInvokePowercfg
+    $script:RemovePendingTask = $script:DefaultRemovePendingTask
+}
+
+<#
+    shutdown.exe /a reports "there was nothing to abort" as exit code 1116,
+    ERROR_NO_SHUTDOWN_IN_PROGRESS. For a CANCEL that is success: the caller wants
+    no pending shutdown, and there is none. Treating it as a failure would make
+    cancelling an already-expired timer look broken.
+#>
+$script:ERROR_NO_SHUTDOWN_IN_PROGRESS = 1116
+
+# Power can be exercised without Core/Log.ps1 loaded (unit tests dot-source this
+# file alone), so logging is best-effort rather than a hard dependency. Same
+# shape as Write-StateLog in Core/State.ps1.
+function Write-PowerLog ([string]$Category, [string]$EventName, [string]$Detail) {
+    if (Get-Command Write-Log -ErrorAction SilentlyContinue) { Write-Log $Category $EventName $Detail }
+}
+
 # Call on the WPF UI thread: the execution-state request is per-thread, and the
 # UI thread is the one that stays alive for the life of the app.
 function Enable-KeepAwake {
@@ -1569,14 +1647,14 @@ function Get-PowerTimeoutSecs {
     $result = @{ SleepAC = 0; SleepDC = 0; HibAC = 0; HibDC = 0 }
     $re = [regex]'Current (AC|DC) Power Setting Index: (0x[\da-fA-F]+)'
     try {
-        $sleepOut = powercfg /query SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 2>&1 | Out-String
+        $sleepOut = (& $script:InvokePowercfg @('/query','SCHEME_CURRENT','SUB_SLEEP','STANDBYIDLE')).Output
         foreach ($m in $re.Matches($sleepOut)) {
             $v = [Convert]::ToInt32($m.Groups[2].Value, 16)
             if ($m.Groups[1].Value -eq 'AC') { $result.SleepAC = $v } else { $result.SleepDC = $v }
         }
     } catch {}
     try {
-        $hibOut = powercfg /query SCHEME_CURRENT SUB_SLEEP HIBERNATEIDLE 2>&1 | Out-String
+        $hibOut = (& $script:InvokePowercfg @('/query','SCHEME_CURRENT','SUB_SLEEP','HIBERNATEIDLE')).Output
         foreach ($m in $re.Matches($hibOut)) {
             $v = [Convert]::ToInt32($m.Groups[2].Value, 16)
             if ($m.Groups[1].Value -eq 'AC') { $result.HibAC = $v } else { $result.HibDC = $v }
@@ -1610,10 +1688,10 @@ function Repair-LegacyPowerSuppression {
 
     $toMins = { param($sec) if ($sec -le 0) { 0 } else { [math]::Max(1, [int][math]::Floor($sec / 60)) } }
     try {
-        powercfg /change standby-timeout-ac   (& $toMins $vals[0]) | Out-Null
-        powercfg /change standby-timeout-dc   (& $toMins $vals[1]) | Out-Null
-        powercfg /change hibernate-timeout-ac (& $toMins $vals[2]) | Out-Null
-        powercfg /change hibernate-timeout-dc (& $toMins $vals[3]) | Out-Null
+        & $script:InvokePowercfg @('/change','standby-timeout-ac',   "$(& $toMins $vals[0])") | Out-Null
+        & $script:InvokePowercfg @('/change','standby-timeout-dc',   "$(& $toMins $vals[1])") | Out-Null
+        & $script:InvokePowercfg @('/change','hibernate-timeout-ac', "$(& $toMins $vals[2])") | Out-Null
+        & $script:InvokePowercfg @('/change','hibernate-timeout-dc', "$(& $toMins $vals[3])") | Out-Null
     } catch {}
 
     Write-State @{ sleepSuppression = @{ active = $false } }
@@ -1651,15 +1729,15 @@ function Write-PendingAction ([string]$Type, [int]$Seconds, [string]$Method, [da
 }
 
 function Start-TimedShutdown ([int]$Seconds) {
-    $out = & shutdown.exe /s /t $Seconds /c "Timed Shutdown Utility" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "shutdown.exe failed: $out" }
+    $r = & $script:InvokeShutdownExe @('/s','/t',"$Seconds",'/c','Timed Shutdown Utility')
+    if ($r.ExitCode -ne 0) { throw "shutdown.exe failed: $($r.Output)" }
     Write-PendingAction 'shutdown' $Seconds 'os-timer' (Get-Date).AddSeconds($Seconds)
     Enable-KeepAwake
 }
 
 function Start-TimedRestart ([int]$Seconds) {
-    $out = & shutdown.exe /r /t $Seconds /c "Timed Shutdown Utility" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "shutdown.exe failed: $out" }
+    $r = & $script:InvokeShutdownExe @('/r','/t',"$Seconds",'/c','Timed Shutdown Utility')
+    if ($r.ExitCode -ne 0) { throw "shutdown.exe failed: $($r.Output)" }
     Write-PendingAction 'restart' $Seconds 'os-timer' (Get-Date).AddSeconds($Seconds)
     Enable-KeepAwake
 }
@@ -1681,42 +1759,100 @@ function Start-TimedHibernate ([int]$Seconds) {
     Enable-KeepAwake
 }
 
+<#
+    Cancels whatever is pending, and reports honestly whether it managed to.
+
+    Three outcomes have to stay distinguishable, because "cancelled" is a claim
+    the user acts on -- they walk away from the machine believing it:
+
+      * the target was there and is now gone   -> success, state cleared
+      * there was nothing to cancel            -> success, state cleared
+      * a cancel was attempted and FAILED      -> throws, state left intact
+
+    -ErrorAction SilentlyContinue collapsed the second and third together, so a
+    failed Unregister-ScheduledTask was indistinguishable from a task that had
+    already gone. The app cleared its state, the UI said the timer was cancelled,
+    and the scheduled sleep fired anyway.
+
+    State is deliberately NOT cleared on failure. pendingAction mirrors something
+    that still exists outside this process, so dropping the mirror would leave
+    the user unable to see -- or retry -- the thing still counting down.
+#>
 function Stop-TimedAction {
-    $s = Read-State
+    $s        = Read-State
+    $failures = @()
+
     if ($s -and $s.pendingAction -and $s.pendingAction.type -in @('shutdown','restart')) {
-        & shutdown.exe /a 2>&1 | Out-Null
+        try {
+            $r = & $script:InvokeShutdownExe @('/a')
+            if ($r.ExitCode -ne 0 -and $r.ExitCode -ne $script:ERROR_NO_SHUTDOWN_IN_PROGRESS) {
+                $failures += "shutdown /a exited $($r.ExitCode): $($r.Output)"
+            }
+        } catch {
+            $failures += "shutdown /a threw: $($_.Exception.Message)"
+        }
     }
+
     foreach ($t in 'TS_pending_sleep','TS_pending_hibernate') {
-        Unregister-ScheduledTask -TaskName $t -TaskPath "$($script:TASK_FOLDER)\" `
-            -Confirm:$false -ErrorAction SilentlyContinue
+        try {
+            & $script:RemovePendingTask $t "$($script:TASK_FOLDER)\" | Out-Null
+        } catch {
+            $failures += "could not remove ${t}: $($_.Exception.Message)"
+        }
     }
+
+    if ($failures.Count -gt 0) {
+        $detail = $failures -join '; '
+        Write-PowerLog 'action' 'cancel-failed' $detail
+        throw "Could not cancel the pending action: $detail"
+    }
+
     Clear-State
     Disable-KeepAwake
     $script:notifyFired   = $false
     $script:guardBlocking = $false
 }
 
+<#
+    Pushes the pending action out by $ExtraSec. Returns $true on success.
+
+    The TRANSACTION matters more than the arithmetic here. For shutdown and
+    restart this cancels the OS timer and then arms a new one, so between those
+    two calls there is no timer at all -- and if the second fails, the first has
+    already destroyed the very thing being extended.
+
+    The old code ran both with their exit codes ignored, inside a catch that
+    swallowed everything, and then wrote pendingAction regardless. A failed
+    re-arm left state claiming a countdown that nothing was driving: the window
+    ticked down to zero and the machine stayed on. That is the v2.1
+    scheduled-task defect exactly -- a timer with nothing behind it -- and the
+    guard extension on the dispatcher tick calls straight into here, so it could
+    happen without anyone touching a Snooze button.
+
+    On failure the honest end state is "nothing pending", because the original
+    really is gone. State is cleared, the reason is logged, and $false is
+    returned so the caller can say so rather than showing a phantom countdown.
+#>
 function Add-SnoozeTime ([int]$ExtraSec) {
     $s = Read-State
-    if (-not ($s -and $s.pendingAction -and $s.pendingAction.type -ne 'null')) { return }
+    if (-not ($s -and $s.pendingAction -and $s.pendingAction.type -ne 'null')) { return $false }
+
+    $type = $s.pendingAction.type
     try {
         $target    = [datetime]::Parse($s.pendingAction.targetAt).ToLocalTime()
         $newTarget = $target.AddSeconds($ExtraSec)
         $newSecs   = [math]::Max(1, [int]($newTarget - (Get-Date)).TotalSeconds)
-        $type      = $s.pendingAction.type
+
         switch ($type) {
-            'shutdown' {
-                & shutdown.exe /a 2>&1 | Out-Null
-                & shutdown.exe /s /t $newSecs /c "Timed Shutdown Utility" 2>&1 | Out-Null
-            }
-            'restart'  {
-                & shutdown.exe /a 2>&1 | Out-Null
-                & shutdown.exe /r /t $newSecs /c "Timed Shutdown Utility" 2>&1 | Out-Null
-            }
-            # New-PendingTask unregisters any existing task of the same name.
+            'shutdown' { Reset-OsTimer '/s' $newSecs }
+            'restart'  { Reset-OsTimer '/r' $newSecs }
+            # New-PendingTask unregisters any existing task of the same name, and
+            # registers with -ErrorAction Stop, so a rejection throws to the catch.
             'sleep'     { New-PendingTask 'TS_pending_sleep' 'rundll32.exe' 'powrprof.dll,SetSuspendState 0,1,0' $newTarget }
             'hibernate' { New-PendingTask 'TS_pending_hibernate' 'shutdown.exe' '/h' $newTarget }
+            default     { throw "unknown pending action type '$type'" }
         }
+
         Write-State @{ pendingAction = @{
             type      = $type
             seconds   = $newSecs
@@ -1725,7 +1861,38 @@ function Add-SnoozeTime ([int]$ExtraSec) {
             targetAt  = $newTarget.ToUniversalTime().ToString('o')
         }}
         $script:notifyFired = $false
-    } catch {}
+        return $true
+    } catch {
+        # Whatever was pending is already gone -- /a ran, or New-PendingTask
+        # unregistered before failing to register. Writing a pendingAction now
+        # would be exactly the phantom timer this exists to prevent.
+        Clear-State
+        Disable-KeepAwake
+        $script:notifyFired   = $false
+        $script:guardBlocking = $false
+        Write-PowerLog 'action' 'snooze-failed' "type=$type error=$($_.Exception.Message)"
+        return $false
+    }
+}
+
+<#
+    Re-arms the OS timer at a new offset: abort, then set.
+
+    The abort may legitimately find nothing -- the timer can expire in the gap
+    between reading state and getting here -- so 1116 is tolerated. The SET is
+    not optional, and a non-zero exit there throws, because carrying on would
+    record a countdown with no timer behind it.
+#>
+function Reset-OsTimer ([string]$Flag, [int]$Seconds) {
+    $abort = & $script:InvokeShutdownExe @('/a')
+    if ($abort.ExitCode -ne 0 -and $abort.ExitCode -ne $script:ERROR_NO_SHUTDOWN_IN_PROGRESS) {
+        throw "shutdown /a exited $($abort.ExitCode): $($abort.Output)"
+    }
+
+    $set = & $script:InvokeShutdownExe @($Flag, '/t', "$Seconds", '/c', 'Timed Shutdown Utility')
+    if ($set.ExitCode -ne 0) {
+        throw "shutdown $Flag exited $($set.ExitCode): $($set.Output)"
+    }
 }
 
 # ── Quick actions ─────────────────────────────────────────────────────────────
@@ -2990,9 +3157,31 @@ $BtnCancel.Add_Click({
     catch { Show-ErrorBox "Failed to cancel: $_" }
 })
 
-$BtnSnooze15.Add_Click({ Add-SnoozeTime 900;  Refresh-ActiveTimer })
-$BtnSnooze30.Add_Click({ Add-SnoozeTime 1800; Refresh-ActiveTimer })
-$BtnSnooze60.Add_Click({ Add-SnoozeTime 3600; Refresh-ActiveTimer })
+<#
+    Add-SnoozeTime returns $false when the re-arm failed. By then the original
+    timer is already cancelled and the pending state cleared, so the panel simply
+    disappears -- which on its own looks exactly like a successful cancel. Say
+    what actually happened instead.
+
+    The Get-TrackedAction check first separates that from the harmless race where
+    the timer expired between the panel rendering and the click landing; there is
+    nothing to report in that case.
+#>
+function Invoke-Snooze ([int]$ExtraSec) {
+    if (-not (Get-TrackedAction)) { Refresh-ActiveTimer; return }
+
+    $extended = Add-SnoozeTime $ExtraSec
+    Refresh-ActiveTimer
+    if (-not $extended) {
+        Show-ErrorBox ("Could not extend the timer.`n`n" +
+                       "The pending action was cancelled and could not be re-armed, " +
+                       "so nothing is scheduled now. See the log for details.")
+    }
+}
+
+$BtnSnooze15.Add_Click({ Invoke-Snooze 900  })
+$BtnSnooze30.Add_Click({ Invoke-Snooze 1800 })
+$BtnSnooze60.Add_Click({ Invoke-Snooze 3600 })
 
 $BtnMonitorOff.Add_Click({ Invoke-MonitorOff })
 $BtnLockScreen.Add_Click({ Invoke-LockScreen })
@@ -3266,13 +3455,26 @@ $mnuOpen.add_Click({ $window.Show(); $window.WindowState = 'Normal'; $window.Act
 $trayIcon.add_DoubleClick({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })
 
 $mnuCancel.add_Click({
-    try {
-        Stop-TimedAction
-        Stop-Trigger 'tray'
-        Disable-KeepAwake
-        Refresh-ActiveTimer
-        Update-TriggerDisplay
-    } catch {}
+    # The steps are independent: a failed timer cancel must not stop the trigger
+    # being disarmed, and one shared catch{} previously meant it did -- while
+    # also hiding the failure entirely.
+    #
+    # Stop-TimedAction now throws when a cancel genuinely failed rather than
+    # reporting success, and that has to reach the user. The whole point is that
+    # nobody should walk away from the machine believing a shutdown was called
+    # off when it was not.
+    $problem = $null
+    try { Stop-TimedAction }   catch { $problem = $_.Exception.Message }
+    try { Stop-Trigger 'tray' } catch {}
+
+    # Only release the keep-awake request if nothing is actually pending; a
+    # failed cancel means something still is.
+    if (-not (Get-TrackedAction)) { Disable-KeepAwake }
+
+    Refresh-ActiveTimer
+    Update-TriggerDisplay
+
+    if ($problem) { Show-ErrorBox "Could not cancel the pending action:`n`n$problem" }
 })
 
 $mnuLog.add_Click({
@@ -3449,9 +3651,19 @@ $dispTimer.Add_Tick({
                             -ThresholdKbps $g.ThresholdKbps -ProcessGuard $g.ProcessGuard -ProcessName $g.ProcessName
 
                 if ($null -ne $reason -and $tremain.TotalSeconds -le $script:GUARD_TRIGGER_SEC -and $tremain.TotalSeconds -gt 0) {
-                    Add-SnoozeTime $script:GUARD_EXTEND_SEC
-                    $script:guardBlocking = $true
-                    Write-Log 'guard' 'extended' "reason=$reason"
+                    # This is the other caller of Add-SnoozeTime, and it runs
+                    # without anyone pressing anything -- so a failed re-arm here
+                    # would strand a phantom countdown with no user action to
+                    # blame. If the extension failed the pending action is now
+                    # gone, and claiming the guard is still holding something
+                    # back would be a lie about a machine that is free to sleep.
+                    if (Add-SnoozeTime $script:GUARD_EXTEND_SEC) {
+                        $script:guardBlocking = $true
+                        Write-Log 'guard' 'extended' "reason=$reason"
+                    } else {
+                        $script:guardBlocking = $false
+                        Write-Log 'guard' 'extend-failed' "reason=$reason"
+                    }
                 }
                 if ($null -ne $reason -and $script:guardBlocking) {
                     $LblGuardBlocked.Text       = "⏸ Waiting: $reason"

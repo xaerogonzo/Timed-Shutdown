@@ -179,9 +179,19 @@ $dispTimer.Add_Tick({
                             -ThresholdKbps $g.ThresholdKbps -ProcessGuard $g.ProcessGuard -ProcessName $g.ProcessName
 
                 if ($null -ne $reason -and $tremain.TotalSeconds -le $script:GUARD_TRIGGER_SEC -and $tremain.TotalSeconds -gt 0) {
-                    Add-SnoozeTime $script:GUARD_EXTEND_SEC
-                    $script:guardBlocking = $true
-                    Write-Log 'guard' 'extended' "reason=$reason"
+                    # This is the other caller of Add-SnoozeTime, and it runs
+                    # without anyone pressing anything -- so a failed re-arm here
+                    # would strand a phantom countdown with no user action to
+                    # blame. If the extension failed the pending action is now
+                    # gone, and claiming the guard is still holding something
+                    # back would be a lie about a machine that is free to sleep.
+                    if (Add-SnoozeTime $script:GUARD_EXTEND_SEC) {
+                        $script:guardBlocking = $true
+                        Write-Log 'guard' 'extended' "reason=$reason"
+                    } else {
+                        $script:guardBlocking = $false
+                        Write-Log 'guard' 'extend-failed' "reason=$reason"
+                    }
                 }
                 if ($null -ne $reason -and $script:guardBlocking) {
                     $LblGuardBlocked.Text       = "⏸ Waiting: $reason"
