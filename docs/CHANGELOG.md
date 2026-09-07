@@ -82,6 +82,13 @@ path is still available behind a checkbox.
 
 **Browse button** for the downloads watch folder.
 
+Arming a named signal on a machine that had never run the app was refused with
+"Folder does not exist" — the signals folder is created by the signal *tool*, and
+arming before the job that signals it is the entire point. The app now creates
+the folder it owns (a full path typed by the user is still checked, never
+created). Found by CI on a clean runner; it passed locally only because that
+machine had run the app before.
+
 **Start with Windows** in the tray menu — a per-user `Run` entry, no
 administrator rights. It reports what the registry actually says afterwards
 rather than what it attempted.

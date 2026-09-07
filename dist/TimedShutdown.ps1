@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-07 06:29:30.
+    Built from src\ by build.ps1 on 2026-09-07 06:43:23.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -3590,8 +3590,35 @@ function Set-TriggerActionSelection ([string]$action) {
     "TimedShutdown-signal.cmd done" from a script, and neither side has to know
     the path. Get-SignalPath is the single place that mapping exists.
 #>
+# Test seam, same shape as Set-StateFilePath / Set-LogFilePath: a test must be
+# able to resolve signal paths without touching a live install.
+$script:SIGNAL_DIR = $null
+function Set-SignalDir ([string]$Path) { $script:SIGNAL_DIR = $Path }
+
 function Get-SignalDir {
+    if ($script:SIGNAL_DIR) { return $script:SIGNAL_DIR }
     return Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals'
+}
+
+<#
+    Creates the signal folder if it is not there yet.
+
+    Without this, arming a named signal on a fresh install was REFUSED with
+    "Folder does not exist" - the folder is only created when the signal tool
+    first runs, and the whole point is to arm the trigger BEFORE the job that
+    signals it. It passed in development purely because the folder already
+    existed on that machine; CI on a clean runner caught it.
+
+    -ErrorAction Stop is load-bearing: New-Item reports a bad path as a
+    NON-terminating error, so without it the caller's try/catch never fires and
+    validation would pass on a folder that was never created.
+#>
+function Initialize-SignalDir {
+    $dir = Get-SignalDir
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+    }
+    return $dir
 }
 
 function Get-SignalPath ([string]$Name) {
@@ -3674,8 +3701,15 @@ function Get-TriggerConfigFromUi {
             return @{ Path = $path; SettleSec = $settle; Recurse = [bool]$ChkRecurse.IsChecked }
         }
         'signal' {
-            if (-not $ChkSignalAdvanced.IsChecked -and -not (Test-SignalName $TxtSignalName.Text.Trim())) {
-                throw "Enter a signal name using letters, digits, dot, dash or underscore.`n`nFor example:  done"
+            if (-not $ChkSignalAdvanced.IsChecked) {
+                if (-not (Test-SignalName $TxtSignalName.Text.Trim())) {
+                    throw "Enter a signal name using letters, digits, dot, dash or underscore.`n`nFor example:  done"
+                }
+                # The app owns this folder, so it creates it rather than refusing.
+                # A full path typed by the user is a different matter: that one is
+                # still checked, never created.
+                try { Initialize-SignalDir | Out-Null }
+                catch { throw "Could not create the signal folder:`n$($_.Exception.Message)" }
             }
             $path = Get-ConfiguredSignalPath
             if (-not $path) { throw 'Enter a signal file path.' }

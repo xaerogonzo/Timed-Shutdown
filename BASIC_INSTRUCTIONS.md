@@ -289,3 +289,14 @@ nothing about the code reads as wrong. `schtasks` native flags (`/SC`, `/ST`,
 `/SD`, `/D`, `/RU SYSTEM`, `/RL HIGHEST`) express the same intent with no XML at
 all. Verify a .NET or cmdlet property exists before designing around it -- the
 same failure shape as `[Environment]::TickCount64`.
+**A test that reads a real user path tests your machine, not the code.** Arming a
+named signal was refused with "Folder does not exist" on any machine that had
+never run the app -- i.e. every fresh install -- because the signals folder is
+created by the signal *tool*, and the whole point is to arm before the job that
+signals it. Locally the folder already existed, so four tests passed; a clean CI
+runner failed all four. Any path a test resolves needs a seam (`Set-SignalDir`,
+`Set-StateFilePath`, `Set-LogFilePath`) pointed at a disposable directory, and
+the "fresh install" case has to be reproduced by deleting it, not assumed.
+
+The app creates folders it owns; it does not create a directory the user typed.
+Those are different decisions and the tests assert both.

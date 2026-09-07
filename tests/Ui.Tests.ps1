@@ -227,6 +227,10 @@ Describe 'Trigger configuration validation' {
         }
         $script:triggerKinds = @('process','downloads','signal','resource','idle')
 
+        # Signal paths resolve into a disposable folder: these tests must never
+        # create or delete anything under a live install's %LOCALAPPDATA%.
+        $script:signalSandbox = Join-Path $env:TEMP "TS_signals_$([guid]::NewGuid().ToString('N'))"
+
         . (Join-Path $script:srcDir 'Core\Time.ps1')
 
         # Lift the two functions under test out of MainWindow.ps1 rather than
@@ -235,8 +239,9 @@ Describe 'Trigger configuration validation' {
         # Every function the validation path reaches. Omitting one does not make
         # a "refuses X" test fail -- it makes it pass for the wrong reason, on a
         # null-reference rather than the refusal being tested.
-        foreach ($fn in 'Get-SignalDir','Get-SignalPath','Test-SignalName',
-                        'Get-ConfiguredSignalPath','Get-SelectedTriggerKind','Get-TriggerConfigFromUi') {
+        foreach ($fn in 'Set-SignalDir','Get-SignalDir','Initialize-SignalDir','Get-SignalPath',
+                        'Test-SignalName','Get-ConfiguredSignalPath','Get-SelectedTriggerKind',
+                        'Get-TriggerConfigFromUi') {
             # The parameter list is optional: Get-SelectedTriggerKind has none,
             # Get-SignalPath ([string]$Name) does. A pattern that assumed one
             # shape silently failed to extract the other.
@@ -244,6 +249,13 @@ Describe 'Trigger configuration validation' {
             if (-not $m.Success) { throw "could not extract $fn from MainWindow.ps1" }
             . ([scriptblock]::Create($m.Value))
         }
+
+        # Must come AFTER the lift: Set-SignalDir is one of the functions above.
+        Set-SignalDir $script:signalSandbox
+    }
+
+    AfterAll {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     It 'refuses <Case>' -TestCases @(
@@ -308,25 +320,63 @@ ope\go.flag' } }
         tools\TimedShutdown-signal.cmd writes to. The name is the whole contract
         between the two halves; if they ever disagree the trigger waits forever
         on a file nothing creates.
+
+        Asserted against the DEFAULT location and as pure strings, so it stays a
+        statement about the contract and touches no filesystem.
     #>
-    It 'resolves a signal name into the folder the signal tool writes to' {
+    It 'defaults to the folder the signal tool writes to' {
+        Set-SignalDir $null
+        try {
+            Get-SignalPath 'done' |
+                Should -Be (Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals\done.flag')
+            $tool = Get-Content (Join-Path $PSScriptRoot '..\tools\TimedShutdown-signal.cmd') -Raw
+            $tool | Should -Match ([regex]::Escape('TimedShutdown\signals'))
+        } finally { Set-SignalDir $script:signalSandbox }
+    }
+
+    <#
+        Regression, caught by CI on a clean runner and not locally.
+
+        Arming a named signal used to be REFUSED with "Folder does not exist"
+        whenever the signals folder had not been created yet - which on a fresh
+        install is always, because the folder appears when the signal TOOL first
+        runs and the entire point is to arm before the job that signals it. It
+        passed in development only because that machine had run the app before.
+
+        The sandbox below is what makes this test mean anything: pointed at a
+        directory that is deleted between cases, it reproduces "fresh install"
+        every time.
+    #>
+    It 'creates the signal folder rather than refusing when it does not exist' {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        Test-Path $script:signalSandbox | Should -BeFalse
+
         $CmbTriggerKind.SelectedIndex = 2
         $ChkSignalAdvanced.IsChecked  = $false
         $TxtSignalName.Text           = 'done'
 
         $cfg = Get-TriggerConfigFromUi
-        $expected = Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals\done.flag'
-        $cfg.Path | Should -Be $expected
-
-        $tool = Get-Content (Join-Path $PSScriptRoot '..\tools\TimedShutdown-signal.cmd') -Raw
-        $tool | Should -Match ([regex]::Escape('TimedShutdown\signals'))
+        $cfg.Path | Should -Be (Join-Path $script:signalSandbox 'done.flag')
+        Test-Path $script:signalSandbox | Should -BeTrue
     }
 
-    It 'accepts a signal name of <_>' -ForEach @('done', 'build_2', 'a.b-c') {
+    It 'accepts a signal name of <_> on a machine that has never run the app' -ForEach @('done', 'build_2', 'a.b-c') {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
         $CmbTriggerKind.SelectedIndex = 2
         $ChkSignalAdvanced.IsChecked  = $false
         $TxtSignalName.Text           = $_
         { Get-TriggerConfigFromUi } | Should -Not -Throw
+    }
+
+    <#
+        A full path the USER typed is still checked and never created: the app
+        owns its own signals folder, not an arbitrary directory.
+    #>
+    It 'still refuses a user-supplied full path in a folder that does not exist' {
+        $CmbTriggerKind.SelectedIndex = 2
+        $ChkSignalAdvanced.IsChecked  = $true
+        $TxtSignalPath.Text = Join-Path $env:TEMP "TS_nope_$([guid]::NewGuid().ToString('N'))\go.flag"
+        { Get-TriggerConfigFromUi } | Should -Throw
     }
 }
 
