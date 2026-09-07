@@ -258,3 +258,97 @@ Describe 'Get-IdleSeconds' {
         { Get-IdleSeconds } | Should -Not -Throw
     }
 }
+
+# ── Process picker ────────────────────────────────────────────────────────────
+
+Describe 'Get-ProcessChoices' {
+
+    BeforeEach {
+        # Stand-ins for System.Diagnostics.Process. Only the two properties the
+        # function reads are modelled, so a test cannot accidentally depend on
+        # what is actually running on the machine.
+        function New-FakeProc ([string]$Name, [string]$Title = '') {
+            [PSCustomObject]@{ ProcessName = $Name; MainWindowTitle = $Title }
+        }
+    }
+
+    It 'returns nothing for an empty list' {
+        @(Get-ProcessChoices @() $true).Count | Should -Be 0
+    }
+
+    It 'survives a null list rather than throwing' {
+        @(Get-ProcessChoices $null $true).Count | Should -Be 0
+    }
+
+    <#
+        The trigger engine aggregates by NAME and treats "exited" as "no
+        instances left". The picker must present the same unit, or it would
+        imply you are choosing one particular window.
+    #>
+    It 'collapses instances of one name into a single row with a count' {
+        $rows = @(Get-ProcessChoices @(
+            (New-FakeProc 'chrome' 'Inbox'), (New-FakeProc 'chrome'), (New-FakeProc 'chrome')
+        ) $true)
+        $rows.Count      | Should -Be 1
+        $rows[0].Name    | Should -Be 'chrome'
+        $rows[0].Count   | Should -Be 3
+        $rows[0].Display | Should -Match '3 running'
+    }
+
+    It 'keeps a window title found on any instance of the group' {
+        # The windowless instance is first, so a naive "read the first one"
+        # implementation would report no title.
+        $rows = @(Get-ProcessChoices @(
+            (New-FakeProc 'code'), (New-FakeProc 'code' 'main.ps1')
+        ) $true)
+        $rows[0].HasWindow | Should -BeTrue
+        $rows[0].Title     | Should -Be 'main.ps1'
+    }
+
+    It 'hides background processes unless asked' {
+        $procs = @((New-FakeProc 'svchost'), (New-FakeProc 'notepad' 'Untitled'))
+        @(Get-ProcessChoices $procs $false).Name | Should -Be 'notepad'
+        @(Get-ProcessChoices $procs $true).Count | Should -Be 2
+    }
+
+    <#
+        A list led by csrss, dwm and svchost is what made the old free-text box
+        feel like the easier option, so this ordering is the feature.
+    #>
+    It 'sorts windowed processes above background ones, then alphabetically' {
+        $rows = @(Get-ProcessChoices @(
+            (New-FakeProc 'zzz-service'), (New-FakeProc 'aaa-service'),
+            (New-FakeProc 'notepad' 'Untitled'), (New-FakeProc 'ffmpeg' 'encoding')
+        ) $true)
+        @($rows | ForEach-Object { $_.Name }) | Should -Be @('ffmpeg', 'notepad', 'aaa-service', 'zzz-service')
+    }
+
+    <#
+        Unelevated - which this app now always is - reading MainWindowTitle on a
+        process owned by another account can throw. That must cost the title,
+        not the whole list.
+    #>
+    It 'keeps going when MainWindowTitle throws' {
+        $hostile = [PSCustomObject]@{ ProcessName = 'guarded' }
+        $hostile | Add-Member -MemberType ScriptProperty -Name MainWindowTitle -Value { throw 'Access is denied' }
+
+        $rows = @(Get-ProcessChoices @($hostile, (New-FakeProc 'notepad' 'Untitled')) $true)
+        $rows.Count | Should -Be 2
+        @($rows | Where-Object { $_.Name -eq 'guarded' }).HasWindow | Should -BeFalse
+    }
+
+    It 'ignores entries with no usable name' {
+        @(Get-ProcessChoices @((New-FakeProc '  '), (New-FakeProc 'notepad' 'x')) $true).Count | Should -Be 1
+    }
+
+    It 'trims a long window title so it cannot widen the dropdown' {
+        $long = 'x' * 200
+        $rows = @(Get-ProcessChoices @((New-FakeProc 'app' $long)) $true)
+        $rows[0].Display.Length | Should -BeLessThan 70
+    }
+
+    It 'omits the count for a single instance' {
+        $rows = @(Get-ProcessChoices @((New-FakeProc 'ffmpeg' 'encode')) $true)
+        $rows[0].Display | Should -Not -Match 'running'
+    }
+}

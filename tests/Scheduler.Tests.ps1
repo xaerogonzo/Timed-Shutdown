@@ -178,3 +178,95 @@ Describe 'Get-ScheduledTaskName' {
         }
     }
 }
+
+<#
+    The elevated registration path, pinned by its arguments.
+
+    It cannot be exercised end to end in a test - it deliberately raises a UAC
+    prompt - so the argument vector is asserted instead. That is where both of
+    its real bugs lived, and neither was visible by reading the code:
+
+      * hand-written quotes around /TN and /TR were passed to schtasks as
+        LITERAL quote characters, and it rejected the task name with "The
+        filename, directory name, or volume label syntax is incorrect";
+      * /SD built from the machine short-date format was rejected with "Invalid
+        Start Date (Date should be in mm/dd/yyyy format)".
+
+    Both were found by running schtasks directly. This test is what keeps them
+    found.
+#>
+Describe 'Register-TaskElevated argument construction' {
+
+    BeforeAll {
+        . "$PSScriptRoot\..\src\Core\Scheduler.ps1"
+
+        # Capture the argument vector instead of raising a UAC prompt.
+        function Start-Process {
+            param($FilePath, $ArgumentList, [switch]$Wait, [switch]$PassThru, $Verb, $WindowStyle)
+            $script:spFile = $FilePath
+            $script:spArgs = @($ArgumentList)
+            return [PSCustomObject]@{ ExitCode = 0 }
+        }
+        function Get-ScheduledTask { param($TaskName, $TaskPath, $ErrorAction)
+            [PSCustomObject]@{ TaskName = $TaskName } }
+
+        function Get-Args ([string]$Rec, [string[]]$Days = @()) {
+            $script:spArgs = $null
+            Register-TaskElevated -Name 'TS_x' -ActionType 'shutdown' -Recurrence $Rec `
+                                  -AtTime '22:30' -DaysOfWeek $Days
+            return $script:spArgs
+        }
+    }
+
+    It 'runs schtasks.exe, not an elevated copy of the app' {
+        Get-Args 'daily' | Out-Null
+        $script:spFile | Should -Be 'schtasks.exe'
+    }
+
+    It 'asks for a SYSTEM principal - the whole reason it elevates' {
+        $a = Get-Args 'daily'
+        $a | Should -Contain 'SYSTEM'
+        $a | Should -Contain '/RL'
+    }
+
+    <#
+        The quoting bug. PowerShell quotes an argument containing spaces on its
+        own; a literal quote character becomes part of the value.
+    #>
+    It 'passes the task name and command without literal quote characters' {
+        $a = @(Get-Args 'daily')
+        $tn = $a[[array]::IndexOf($a, '/TN') + 1]
+        $tr = $a[[array]::IndexOf($a, '/TR') + 1]
+
+        $tn | Should -Be '\TimedShutdown\TS_x'
+        $tn | Should -Not -Match '"'
+        $tr | Should -Be 'shutdown.exe /s /f'
+        $tr | Should -Not -Match '"'
+    }
+
+    <#
+        The date bug. schtasks demands literal mm/dd/yyyy and rejects the machine
+        short-date format - the opposite of this codebase's usual locale rule,
+        which is exactly why it needs a test rather than a comment.
+    #>
+    It 'formats /SD as mm-dd-yyyy regardless of culture' {
+        $a = @(Get-Args 'once')
+        $sd = $a[[array]::IndexOf($a, '/SD') + 1]
+        $sd | Should -Match '^\d{2}/\d{2}/\d{4}$'
+    }
+
+    It 'abbreviates weekly days the way schtasks expects' {
+        $a = @(Get-Args 'weekly' @('Monday', 'Wednesday'))
+        $a[[array]::IndexOf($a, '/D') + 1] | Should -Be 'MON,WED'
+    }
+
+    It 'refuses a weekly schedule with no days rather than creating a broken task' {
+        { Get-Args 'weekly' @() } | Should -Throw
+    }
+
+    It 'refuses an unknown recurrence or action' {
+        { Get-Args 'hourly' } | Should -Throw
+        { Register-TaskElevated -Name 'x' -ActionType 'explode' -Recurrence 'daily' -AtTime '22:30' } |
+            Should -Throw
+    }
+}

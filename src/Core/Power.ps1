@@ -269,7 +269,7 @@ function Stop-TimedAction {
         try {
             & $script:RemovePendingTask $t "$($script:TASK_FOLDER)\" | Out-Null
         } catch {
-            $failures += "could not remove ${t}: $($_.Exception.Message)"
+            $failures += Format-TaskRemovalFailure $t $_.Exception.Message
         }
     }
 
@@ -279,10 +279,33 @@ function Stop-TimedAction {
         throw "Could not cancel the pending action: $detail"
     }
 
+    $wasPending = if ($s -and $s.pendingAction) { "$($s.pendingAction.type)" } else { 'none' }
+    Write-PowerLog 'action' 'cancelled' "was=$wasPending"
+
     Clear-State
     Disable-KeepAwake
     $script:notifyFired   = $false
     $script:guardBlocking = $false
+}
+
+<#
+    Explains a failed task removal, naming the upgrade case when that is what it is.
+
+    Builds up to 2.3 registered pending tasks under a SYSTEM principal, which
+    required elevation. 2.4 registers them as the current user and no longer
+    elevates - so a task left behind by the older build cannot be removed by
+    this process, and the raw CIM error ("Access is denied") gives the user
+    nothing to act on. A cancel that fails is the one message in this app that
+    must be unambiguous: the user acts on it by walking away from the machine.
+#>
+function Format-TaskRemovalFailure ([string]$TaskName, [string]$Message) {
+    if ($Message -match '(?i)access is denied|0x80070005|unauthorized') {
+        return ("could not remove ${TaskName}: it was created by an older version of " +
+                'Timed Shutdown that ran as administrator, so this (unelevated) copy ' +
+                'cannot remove it. Use Remove leftover tasks on the Scheduled tab, or ' +
+                'delete it from Task Scheduler under \TimedShutdown.')
+    }
+    return "could not remove ${TaskName}: $Message"
 }
 
 <#

@@ -104,7 +104,9 @@ Describe 'Parameter names' {
         # returns an object with a settable EndBoundary, which the code needs.
         function New-ScheduledTaskTrigger   { param([switch]$Once, $At)
             [PSCustomObject]@{ Once = [bool]$Once; At = $At; EndBoundary = $null } }
-        function New-ScheduledTaskPrincipal { param($UserId, $RunLevel) 'principal' }
+        function New-ScheduledTaskPrincipal { param($UserId, $LogonType, $RunLevel)
+            $script:principalArgs = @{ UserId = $UserId; LogonType = $LogonType; RunLevel = $RunLevel }
+            return 'principal' }
         function New-ScheduledTaskSettingsSet { param($DeleteExpiredTaskAfter, $ExecutionTimeLimit) 'settings' }
         function Register-ScheduledTask   { param($TaskName,$TaskPath,$Action,$Trigger,$Principal,$Settings,[switch]$Force)
             $script:registeredTrigger = $Trigger }
@@ -112,9 +114,14 @@ Describe 'Parameter names' {
         function Ensure-TaskFolder {}
 
         $sched = Get-Content (Join-Path $script:srcDir 'Core\Scheduler.ps1') -Raw -Encoding UTF8
-        $m = [regex]::Match($sched, '(?ms)^function New-PendingTask.*?^\}')
-        $m.Success | Should -BeTrue
-        . ([scriptblock]::Create($m.Value))
+        # New-PendingTask now delegates the principal choice, so lift that
+        # function in too rather than stubbing it - which principal it picks is
+        # exactly what the next test checks.
+        foreach ($fn in 'New-TaskPrincipalFor', 'New-PendingTask') {
+            $m = [regex]::Match($sched, "(?ms)^function $fn .*?^\}")
+            $m.Success | Should -BeTrue
+            . ([scriptblock]::Create($m.Value))
+        }
 
         { New-PendingTask 'TS_pending_sleep' 'rundll32.exe' 'powrprof.dll,SetSuspendState 0,1,0' (Get-Date) } |
             Should -Not -Throw
@@ -132,6 +139,24 @@ Describe 'Parameter names' {
     It 'gives the one-shot trigger an EndBoundary' {
         $script:registeredTrigger | Should -Not -BeNullOrEmpty
         $script:registeredTrigger.EndBoundary | Should -Not -BeNullOrEmpty
+    }
+
+    <#
+        Regression: builds up to 2.3 registered this task under a SYSTEM
+        principal, and that single choice is why the whole app demanded UAC on
+        every launch. A task backing a countdown shown in a visible window has
+        no need of it - the user is signed in by definition.
+
+        Asserting "not SYSTEM" rather than a literal account name keeps this
+        meaningful on any machine, including CI runners.
+    #>
+    It 'backs a pending timer with a current-user principal, never SYSTEM' {
+        $script:principalArgs | Should -Not -BeNullOrEmpty
+        $script:principalArgs.UserId    | Should -Not -Match '(?i)^system$'
+        $script:principalArgs.UserId    | Should -Not -Be 'S-1-5-18'
+        $script:principalArgs.LogonType | Should -Be 'Interactive'
+        # Highest would raise a UAC prompt; SetSuspendState does not need one.
+        $script:principalArgs.RunLevel  | Should -Be 'Limited'
     }
 
     It 'lets scheduled-task registration failures surface' {
@@ -194,5 +219,71 @@ Describe 'Variable assignments' {
         )
         ($offenders | ForEach-Object { "$($_.File):$($_.Line) -> `$$($_.Variable)" }) -join '; ' |
             Should -BeNullOrEmpty
+    }
+}
+
+<#
+    The admin gate, pinned out.
+
+    Builds up to 2.3 refused to start unelevated, and the sole cause was a
+    SYSTEM task principal. Both halves are asserted: no startup gate, and no
+    module quietly reintroducing a SYSTEM principal on the default path.
+#>
+Describe 'Runs without elevation' {
+
+    BeforeAll {
+        $script:allSrc = @(Get-ChildItem -Path $script:srcDir -Recurse -Include '*.ps1' -File)
+    }
+
+    It 'has no #Requires -RunAsAdministrator anywhere in src' {
+        $hits = @($script:allSrc | Where-Object {
+            (Get-Content $_.FullName -Raw -Encoding UTF8) -match '(?im)^\s*#Requires.*RunAsAdministrator'
+        })
+        ($hits | ForEach-Object { $_.Name }) -join ', ' | Should -BeNullOrEmpty
+    }
+
+    <#
+        Main.ps1 may still READ the elevation state - the Scheduled tab needs to
+        know whether it must escalate - but it must not exit on it.
+    #>
+    It 'does not exit when the user is not an administrator' {
+        $main = Get-Content (Join-Path $script:srcDir 'Main.ps1') -Raw -Encoding UTF8
+        $main | Should -Not -Match '(?s)if \(-not \$isAdmin\)'
+        $main | Should -Not -Match 'Administrator privileges are required'
+    }
+
+    It 'still records elevation so the opt-in path can use it' {
+        $main = Get-Content (Join-Path $script:srcDir 'Main.ps1') -Raw -Encoding UTF8
+        $main | Should -Match '\$script:isElevated'
+    }
+
+    <#
+        A SYSTEM principal is legitimate ONLY behind the explicit
+        "run even when I'm signed out" opt-in, which New-TaskPrincipalFor gates.
+        Anywhere else it silently reintroduces the UAC requirement.
+    #>
+    It 'creates SYSTEM principals only inside New-TaskPrincipalFor' {
+        $offenders = @()
+        foreach ($f in $script:allSrc) {
+            $text = Get-Content $f.FullName -Raw -Encoding UTF8
+            foreach ($m in [regex]::Matches($text, "New-ScheduledTaskPrincipal[^
+]*")) {
+                if ($m.Value -match "(?i)-UserId\s+'?SYSTEM'?") {
+                    # Allowed only in the helper that the opt-in calls.
+                    $before = $text.Substring(0, $m.Index)
+                    $fn = [regex]::Matches($before, '(?m)^function\s+([A-Za-z-]+)')
+                    $enclosing = if ($fn.Count) { $fn[$fn.Count - 1].Groups[1].Value } else { '<top level>' }
+                    if ($enclosing -ne 'New-TaskPrincipalFor') {
+                        $offenders += "$($f.Name): $enclosing"
+                    }
+                }
+            }
+        }
+        ($offenders -join '; ') | Should -BeNullOrEmpty
+    }
+
+    It 'no longer auto-elevates from the launcher' {
+        $bat = Get-Content (Join-Path $script:srcDir '..\TimedShutdown.bat') -Raw
+        $bat | Should -Not -Match '(?i)-Verb RunAs'
     }
 }

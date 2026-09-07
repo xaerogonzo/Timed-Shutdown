@@ -1,0 +1,16 @@
+# Line endings are pinned rather than left to each clone's core.autocrlf.
+#
+# This is a Windows-only PowerShell/WPF project: the launcher is a .bat (which
+# genuinely requires CRLF), and the sources are CRLF on disk. Without this file
+# the working tree depends on a per-machine git setting, so two developers can
+# see different diffs for a file neither of them edited.
+#
+# NOTE: this governs line endings only. It does NOT affect the UTF-8 BOM that
+# every .ps1 and .xaml under src\ must carry - a BOM sits at the start of the
+# file, not at the end of a line. build.ps1 remains the gate for that.
+* text=auto eol=crlf
+
+# Binary: never touch these.
+*.png  binary
+*.jpg  binary
+*.ico  binary

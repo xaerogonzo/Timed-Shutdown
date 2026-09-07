@@ -14,21 +14,28 @@
 # Shown in the header, the tray tooltip, and every log line. NOT in Window.Title:
 # the single-instance guard finds the existing window by exact title, so the
 # title has to stay stable across versions.
-$script:APP_VERSION = '2.3'
+$script:APP_VERSION = '2.4'
+
+# The project root: the folder holding tools\ and TimedShutdown.bat. Both entry
+# points sit one level below it - src\Main.ps1 during development, and
+# dist\TimedShutdown.ps1 for the bundle - so the parent is correct either way.
+$script:AppRoot = Split-Path $PSScriptRoot -Parent
 
 . "$PSScriptRoot\Interop.ps1"
 
-# ── Admin check ───────────────────────────────────────────────────────────────
-# Registering SYSTEM-principal scheduled tasks (sleep/hibernate timers and the
-# Schedule tab) needs elevation. TimedShutdown.bat handles the UAC prompt.
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+# ── Privilege ─────────────────────────────────────────────────────────────────
+# There is deliberately no admin gate. Builds up to 2.3 refused to start without
+# elevation, and the sole cause was that every scheduled task was registered
+# under a SYSTEM principal. Tasks now register under the current user, which
+# Authenticated Users may do (they hold Write on %WINDIR%\System32\Tasks), and
+# shutdown / restart / sleep / hibernate all run on a standard token.
+#
+# Elevation is now requested only where it is genuinely required -- the opt-in
+# "run even when I'm signed out" schedule -- and only for that one operation.
+# The flag is recorded here so the UI can skip the elevated round trip when the
+# user happens to be running elevated anyway.
+$script:isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    [System.Windows.MessageBox]::Show(
-        "Administrator privileges are required.`n`nPlease launch via TimedShutdown.bat.",
-        'Administrator Required', 'OK', 'Warning') | Out-Null
-    exit 1
-}
 
 # ── Single instance ───────────────────────────────────────────────────────────
 # Before ANY state mutation: two instances would both tick and fight over

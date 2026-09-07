@@ -1,4 +1,97 @@
-# Changelog
+﻿# Changelog
+
+## v2.4 - 2026-09-07
+
+Usability. Three of these were reported from using v2.3, and the fourth was a
+recipe in our own README that would have shut someone's machine down at the
+wrong moment.
+
+Every item was traced to a specific cause rather than guessed at.
+
+### Changed
+
+**The app no longer asks for administrator rights.** It never needed them. The
+sole cause was `New-ScheduledTaskPrincipal -UserId 'SYSTEM'` — registering a task
+that runs as SYSTEM requires elevation, and that one line made the whole app
+demand UAC on every launch. Nothing else did: Authenticated Users hold Write on
+`%WINDIR%\System32\Tasks`, and `shutdown.exe /a` returns 1116 ("nothing to
+abort"), not 5 ("access denied"), on a standard token. Tasks now register under
+the current user, the gate in `Main.ps1` is gone, and `TimedShutdown.bat` no
+longer self-elevates.
+
+The trade is stated rather than hidden: a current-user task fires while you are
+signed in — a locked screen still counts — but not once you sign out. A schedule
+that needs to survive sign-out can tick **Run even when I am signed out**, which
+asks for approval once, at the moment you press Create, by escalating a single
+`schtasks.exe` call instead of the app.
+
+`Source.Tests.ps1` now fails the build if a SYSTEM principal appears anywhere
+outside `New-TaskPrincipalFor`.
+
+**Upgrading from 2.3 or earlier needs one cleanup.** Tasks the old elevated build
+registered as SYSTEM cannot be removed by this unelevated one — which would mean
+Cancel failing on exactly the timer you want stopped. The Scheduled tab now shows
+**Remove leftover tasks** when any are found, and a failed removal explains that
+cause instead of surfacing "Access is denied".
+
+### Fixed
+
+**The dropdown menus were unreadable.** ComboBox was the only control in the app
+still using the stock Aero template, which *ignores* the `Background` you set and
+paints its popup with `SystemColors.WindowBrush` — white — leaving the theme's
+pale `#CDD6F4` text on a white background. Setting more colours could never have
+fixed it. Both windows now use real `ControlTemplate`s from a shared
+`src\UI\Theme.xaml`, along with the four `RadioButton`s that had no style at all.
+
+The regression tests assert the **template**, not the colour: an assertion on
+`Background` passes against the broken version. All four were confirmed to fail
+when the fix is reverted.
+
+**The "wait for" box rendered blank** while `Get-SelectedTriggerKind` clamped the
+unset index to 0 and treated it as "A process exits". Display and behaviour
+disagreed; the default is now explicit in the markup.
+
+**A cancelled timer was not logged.** The README promised "every arm, fire,
+cancel, and abort is recorded with a reason", but only the failure path wrote a
+line — so the one question you ask the log ("was my timer actually called off?")
+had no answer in it.
+
+**The README's Claude Code recipe was wrong.** It presented a `Stop` hook as
+"shuts down when Claude finishes". `Stop` fires **once per turn**, not once per
+job: arm a shutdown, send one more message, and the machine powers off after the
+next reply. The docs now lead with chaining the signal to the command itself
+(`claude -p "…" && TimedShutdown-signal.cmd done`), which fires exactly once,
+offer `SessionEnd` for "done for the night", and keep `Stop` with its per-turn
+behaviour stated plainly.
+
+### Added
+
+**A process picker.** The process trigger was a bare text box that required
+knowing the executable name exactly. There is now a dropdown of running
+processes, grouped by name with an instance count and window title, with
+windowed applications sorted above background services. It **adds to** the text
+box rather than replacing it, because arming for a process that has not started
+yet is a supported case the engine handles deliberately. The list is built on
+`DropDownOpened` — `Get-Process` costs 50–150 ms, far past the 1 Hz tick budget.
+
+**Named signals.** The signal trigger took a raw file path; it now takes a short
+name (default `done`) resolved to the same folder
+`tools\TimedShutdown-signal.cmd` writes to, shows the path it resolves to, and
+has a **Copy command** button that puts the exact line on your clipboard. A full
+path is still available behind a checkbox.
+
+**Browse button** for the downloads watch folder.
+
+**Start with Windows** in the tray menu — a per-user `Run` entry, no
+administrator rights. It reports what the registry actually says afterwards
+rather than what it attempted.
+
+### Repository
+
+- `actions/checkout@v4` → `@v5`, clearing the Node 20 deprecation warning
+- `.gitattributes` pins line endings, which previously depended on each clone's
+  `core.autocrlf`. It governs line endings only — the UTF-8 BOM rule is
+  unaffected, and `build.ps1` remains the gate for that.
 
 ## v2.3 - 2026-09-04
 

@@ -1,0 +1,163 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+    UI/Theme.xaml - control templates shared by every window.
+
+    These three controls were the only ones in the app still rendering with the
+    stock Aero theme, and the ComboBox is why the "wait for" menu was unreadable.
+    The Aero template IGNORES the Background set on a ComboBox and paints its
+    dropdown popup with SystemColors.WindowBrush: white. The pale #CDD6F4
+    foreground then sat on white. Setting properties cannot fix that; only
+    replacing the template can, which is what this file does.
+
+    RULES FOR THIS FILE
+
+      * Self-contained. UI/Xaml.ps1 splices these entries in BEFORE each window
+        declares its own resources, so a {StaticResource} pointing at something
+        defined in MainWindow.xaml would not yet resolve. Everything referenced
+        here must be defined here.
+      * PART_Popup is load-bearing, not decorative: ComboBox looks that name up
+        to find its dropdown. Same rule as PART_SelectedContentHost on the
+        TabControl: rename it and the control silently stops working.
+      * The popup Border sets its own Background explicitly. Inheriting it is
+        precisely the bug being fixed.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- Chrome for the ComboBox drop-down button: the box itself, plus a chevron. -->
+  <ControlTemplate x:Key="TsComboToggle" TargetType="ToggleButton">
+    <Border x:Name="Bd"
+            Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+            BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+            BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+      <Path x:Name="Arrow" Data="M 0 0 L 4 4 L 8 0 Z" Fill="#9399B2"
+            HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"/>
+    </Border>
+    <ControlTemplate.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="Bd"    Property="BorderBrush" Value="#7C9DDA"/>
+        <Setter TargetName="Arrow" Property="Fill"        Value="#CDD6F4"/>
+      </Trigger>
+      <Trigger Property="IsChecked" Value="True">
+        <Setter TargetName="Bd"    Property="BorderBrush" Value="#7C9DDA"/>
+        <Setter TargetName="Arrow" Property="Fill"        Value="#CDD6F4"/>
+      </Trigger>
+    </ControlTemplate.Triggers>
+  </ControlTemplate>
+
+  <Style TargetType="ComboBox">
+    <Setter Property="Background"          Value="#2A2A3E"/>
+    <Setter Property="Foreground"          Value="#CDD6F4"/>
+    <Setter Property="BorderBrush"         Value="#45475A"/>
+    <Setter Property="BorderThickness"     Value="1"/>
+    <Setter Property="Height"              Value="34"/>
+    <Setter Property="FontSize"            Value="13"/>
+    <Setter Property="Padding"             Value="12,0,28,0"/>
+    <Setter Property="Cursor"              Value="Hand"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <!-- Toggle first so the content draws on top of it. The content is
+                 not hit-test visible, so a click anywhere opens the list. -->
+            <ToggleButton x:Name="TsToggle" Focusable="False" ClickMode="Press"
+                          Template="{StaticResource TsComboToggle}"
+                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay,
+                                      RelativeSource={RelativeSource TemplatedParent}}"/>
+            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                              Content="{TemplateBinding SelectionBoxItem}"
+                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                              Margin="{TemplateBinding Padding}"
+                              VerticalAlignment="Center" HorizontalAlignment="Left"/>
+            <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True"
+                   Focusable="False" PopupAnimation="Fade"
+                   IsOpen="{TemplateBinding IsDropDownOpen}">
+              <Border Background="#2A2A3E" BorderBrush="#45475A" BorderThickness="1"
+                      CornerRadius="6" Margin="0,3,0,0" SnapsToDevicePixels="True"
+                      MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,4,0,4">
+                  <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                </ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter TargetName="ContentSite" Property="Opacity" Value="0.45"/>
+              <Setter TargetName="TsToggle"    Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Foreground"          Value="#CDD6F4"/>
+    <Setter Property="FontSize"            Value="13"/>
+    <Setter Property="Padding"             Value="12,7"/>
+    <Setter Property="Cursor"              Value="Hand"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="Bd" Background="Transparent" CornerRadius="4"
+                  Margin="4,1" Padding="{TemplateBinding Padding}"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#45475A"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#7C9DDA"/>
+              <Setter Property="Foreground" Value="#1E1E2E"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#6C7086"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="RadioButton">
+    <Setter Property="Foreground" Value="#BAC2DE"/>
+    <Setter Property="FontSize"   Value="12"/>
+    <Setter Property="Cursor"     Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RadioButton">
+          <StackPanel Orientation="Horizontal" Background="Transparent">
+            <Grid Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,7,0">
+              <Ellipse x:Name="Ring" Stroke="#45475A" StrokeThickness="1.5" Fill="#2A2A3E"/>
+              <Ellipse x:Name="Dot"  Width="7" Height="7" Fill="#7C9DDA" Visibility="Collapsed"/>
+            </Grid>
+            <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True"/>
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="Ring" Property="Stroke"     Value="#7C9DDA"/>
+              <Setter TargetName="Dot"  Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Ring" Property="Stroke"     Value="#7C9DDA"/>
+              <Setter Property="Foreground" Value="#CDD6F4"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+</ResourceDictionary>
