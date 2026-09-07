@@ -50,9 +50,17 @@ $TxtProcNames       = $window.FindName('TxtProcNames')
 $TxtProcNamesPlaceholder = $window.FindName('TxtProcNamesPlaceholder')
 $RbProcAll          = $window.FindName('RbProcAll')
 $RbProcAny          = $window.FindName('RbProcAny')
+$CmbProcPick        = $window.FindName('CmbProcPick')
+$ChkProcBackground  = $window.FindName('ChkProcBackground')
 $TxtDownloadPath    = $window.FindName('TxtDownloadPath')
+$BtnBrowseDownload  = $window.FindName('BtnBrowseDownload')
 $TxtSettleSec       = $window.FindName('TxtSettleSec')
 $ChkRecurse         = $window.FindName('ChkRecurse')
+$TxtSignalName      = $window.FindName('TxtSignalName')
+$BtnCopySignalCmd   = $window.FindName('BtnCopySignalCmd')
+$LblSignalResolved  = $window.FindName('LblSignalResolved')
+$ChkSignalAdvanced  = $window.FindName('ChkSignalAdvanced')
+$PanelSignalPath    = $window.FindName('PanelSignalPath')
 $TxtSignalPath      = $window.FindName('TxtSignalPath')
 $ChkResNet          = $window.FindName('ChkResNet')
 $TxtResKbps         = $window.FindName('TxtResKbps')
@@ -77,6 +85,7 @@ $BtnGraceSnooze     = $window.FindName('BtnGraceSnooze')
 $BtnTriggerArm      = $window.FindName('BtnTriggerArm')
 $LvScheduled        = $window.FindName('LvScheduled')
 $BtnAddSchedule     = $window.FindName('BtnAddSchedule')
+$BtnCleanupLegacy   = $window.FindName('BtnCleanupLegacy')
 $BtnRemoveSchedule  = $window.FindName('BtnRemoveSchedule')
 
 # ── UI-scope state ────────────────────────────────────────────────────────────
@@ -141,6 +150,83 @@ function Set-TriggerActionSelection ([string]$action) {
     foreach ($key in $map.Keys) { $map[$key].IsChecked = ($key -eq $action) }
 }
 
+<#
+    Where a named signal lives.
+
+    Deliberately the same folder tools\TimedShutdown-signal.cmd writes to. The
+    name is the contract between the two: a user types "done" here and runs
+    "TimedShutdown-signal.cmd done" from a script, and neither side has to know
+    the path. Get-SignalPath is the single place that mapping exists.
+#>
+# Test seam, same shape as Set-StateFilePath / Set-LogFilePath: a test must be
+# able to resolve signal paths without touching a live install.
+$script:SIGNAL_DIR = $null
+function Set-SignalDir ([string]$Path) { $script:SIGNAL_DIR = $Path }
+
+function Get-SignalDir {
+    if ($script:SIGNAL_DIR) { return $script:SIGNAL_DIR }
+    return Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals'
+}
+
+<#
+    Creates the signal folder if it is not there yet.
+
+    Without this, arming a named signal on a fresh install was REFUSED with
+    "Folder does not exist" - the folder is only created when the signal tool
+    first runs, and the whole point is to arm the trigger BEFORE the job that
+    signals it. It passed in development purely because the folder already
+    existed on that machine; CI on a clean runner caught it.
+
+    -ErrorAction Stop is load-bearing: New-Item reports a bad path as a
+    NON-terminating error, so without it the caller's try/catch never fires and
+    validation would pass on a folder that was never created.
+#>
+function Initialize-SignalDir {
+    $dir = Get-SignalDir
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+    }
+    return $dir
+}
+
+function Get-SignalPath ([string]$Name) {
+    return Join-Path (Get-SignalDir) "$Name.flag"
+}
+
+# The name goes into a filename, so refuse anything that is not one. Rejecting
+# early beats a confusing failure when the trigger tries to watch the path.
+function Test-SignalName ([string]$Name) {
+    if (-not $Name) { return $false }
+    if ($Name.Length -gt 64) { return $false }
+    return $Name -match '^[A-Za-z0-9._-]+$'
+}
+
+<#
+    The signal file the UI is currently configured for, honouring the
+    advanced "use a full path instead" escape hatch.
+#>
+function Get-ConfiguredSignalPath {
+    if ($ChkSignalAdvanced.IsChecked) { return $TxtSignalPath.Text.Trim() }
+    return Get-SignalPath ($TxtSignalName.Text.Trim())
+}
+
+function Update-SignalDisplay {
+    $advanced = [bool]$ChkSignalAdvanced.IsChecked
+    $PanelSignalPath.Visibility = if ($advanced) { 'Visible' } else { 'Collapsed' }
+    $BtnCopySignalCmd.IsEnabled = -not $advanced
+
+    if ($advanced) {
+        $LblSignalResolved.Text = ''
+        return
+    }
+    $name = $TxtSignalName.Text.Trim()
+    $LblSignalResolved.Text = if (Test-SignalName $name) {
+        Get-SignalPath $name
+    } else {
+        'Use letters, digits, dot, dash or underscore.'
+    }
+}
+
 function Get-SelectedTriggerKind {
     $i = [math]::Max(0, $CmbTriggerKind.SelectedIndex)
     return $script:triggerKinds[$i]
@@ -183,7 +269,17 @@ function Get-TriggerConfigFromUi {
             return @{ Path = $path; SettleSec = $settle; Recurse = [bool]$ChkRecurse.IsChecked }
         }
         'signal' {
-            $path = $TxtSignalPath.Text.Trim()
+            if (-not $ChkSignalAdvanced.IsChecked) {
+                if (-not (Test-SignalName $TxtSignalName.Text.Trim())) {
+                    throw "Enter a signal name using letters, digits, dot, dash or underscore.`n`nFor example:  done"
+                }
+                # The app owns this folder, so it creates it rather than refusing.
+                # A full path typed by the user is a different matter: that one is
+                # still checked, never created.
+                try { Initialize-SignalDir | Out-Null }
+                catch { throw "Could not create the signal folder:`n$($_.Exception.Message)" }
+            }
+            $path = Get-ConfiguredSignalPath
             if (-not $path) { throw 'Enter a signal file path.' }
             $dir = Split-Path $path -Parent
             if ($dir -and -not (Test-Path -LiteralPath $dir)) { throw "Folder does not exist:`n$dir" }
@@ -329,6 +425,100 @@ $TxtProcNames.Add_TextChanged({
         if ([string]::IsNullOrEmpty($TxtProcNames.Text)) { 'Visible' } else { 'Collapsed' }
 })
 
+# ── Process picker ────────────────────────────────────────────────────────────
+
+<#
+    Refills the picker from the live process list.
+
+    Bound to DropDownOpened, NOT to the dispatcher tick: enumerating processes
+    costs 50-150 ms, and the tick has a hard rule against work of that size. It
+    also means the list is always current at the moment it is read, with no
+    cache to go stale.
+#>
+function Update-ProcessPicker {
+    $prompt = [PSCustomObject]@{ Name = ''; Display = 'Pick a running process…' }
+    $rows   = @()
+    try {
+        $rows = @(Get-ProcessChoices (Get-Process -ErrorAction SilentlyContinue) `
+                                     ([bool]$ChkProcBackground.IsChecked))
+    } catch {}
+
+    # ItemTemplate comes from the markup; setting DisplayMemberPath as well
+    # would throw, and would not fix the closed box in any case.
+    $CmbProcPick.ItemsSource   = @($prompt) + $rows
+    $CmbProcPick.SelectedIndex = 0
+}
+
+<#
+    Appends the picked name to the text box.
+
+    The box stays the source of truth - the picker only saves typing - so this
+    de-duplicates against what is already there rather than replacing it, and
+    resets the selection so the control reads as an action rather than a
+    current value.
+#>
+function Add-PickedProcess {
+    $item = $CmbProcPick.SelectedItem
+    if (-not $item -or -not $item.Name) { return }
+
+    $existing = @($TxtProcNames.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($existing -notcontains $item.Name) {
+        $existing += $item.Name
+        $TxtProcNames.Text = ($existing -join ', ')
+    }
+    $CmbProcPick.SelectedIndex = 0
+}
+
+# Seed with just the prompt so the control reads as a labelled action rather
+# than an empty box. The real list is built on open.
+$CmbProcPick.ItemsSource   = @([PSCustomObject]@{ Name = ''; Display = 'Pick a running process…' })
+$CmbProcPick.SelectedIndex = 0
+
+$CmbProcPick.Add_DropDownOpened({ Update-ProcessPicker })
+$CmbProcPick.Add_SelectionChanged({ Add-PickedProcess })
+$ChkProcBackground.Add_Click({ Update-ProcessPicker })
+
+# ── Path pickers ──────────────────────────────────────────────────────────────
+# The app no longer runs elevated, so these dialogs can interact with an
+# unelevated Explorer normally. Validation stays in Get-TriggerConfigFromUi:
+# a picker is a convenience, never a second source of truth.
+
+$BtnBrowseDownload.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Folder to watch for downloads'
+    $current = $TxtDownloadPath.Text.Trim()
+    if ($current -and (Test-Path -LiteralPath $current)) { $dlg.SelectedPath = $current }
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $TxtDownloadPath.Text = $dlg.SelectedPath
+    }
+    $dlg.Dispose()
+})
+
+$ChkSignalAdvanced.Add_Click({ Update-SignalDisplay })
+$TxtSignalName.Add_TextChanged({ Update-SignalDisplay })
+
+<#
+    Puts the exact command on the clipboard.
+
+    The whole point of naming signals is that the user never has to reason about
+    where the flag file goes; handing them the literal line to paste into a hook
+    or build script is what closes that loop.
+#>
+$BtnCopySignalCmd.Add_Click({
+    $name = $TxtSignalName.Text.Trim()
+    if (-not (Test-SignalName $name)) {
+        Show-ErrorBox "Enter a signal name first.`n`nLetters, digits, dot, dash or underscore - for example:  done"
+        return
+    }
+    $tool = Join-Path $script:AppRoot 'tools\TimedShutdown-signal.cmd'
+    try {
+        [System.Windows.Clipboard]::SetText("`"$tool`" $name")
+        $LblSignalResolved.Text = 'Copied. Paste it wherever your job finishes.'
+    } catch {
+        Show-ErrorBox "Could not write to the clipboard: $($_.Exception.Message)"
+    }
+})
+
 $TxtIdleTime.Add_TextChanged({
     $TxtIdlePlaceholder.Visibility =
         if ([string]::IsNullOrEmpty($TxtIdleTime.Text)) { 'Visible' } else { 'Collapsed' }
@@ -371,7 +561,8 @@ $BtnGraceSnooze.Add_Click({
 # Refresh the task list when the Scheduled tab is opened rather than on a timer.
 $MainTabs.Add_SelectionChanged({
     if ($MainTabs.SelectedIndex -eq 2) {
-        try { Refresh-ScheduledList } catch {}
+        try { Refresh-ScheduledList }        catch {}
+        try { Update-LegacyCleanupButton }   catch {}
     }
 })
 
@@ -379,9 +570,51 @@ $BtnAddSchedule.Add_Click({
     $res = Show-AddScheduleDialog $window
     if ($null -ne $res) {
         try {
-            Add-ScheduledAction $res.ActionType $res.Recurrence $res.AtTime $res.DaysOfWeek | Out-Null
+            Add-ScheduledAction $res.ActionType $res.Recurrence $res.AtTime $res.DaysOfWeek `
+                                $res.WhenSignedOut | Out-Null
             Refresh-ScheduledList
         } catch { Show-ErrorBox "Failed to create scheduled task: $_" }
+    }
+})
+
+<#
+    Shows the cleanup button only when leftovers actually exist.
+
+    Called when the Scheduled tab is opened rather than on a timer: enumerating
+    tasks is a CIM query and has no business on the dispatcher tick.
+#>
+function Update-LegacyCleanupButton {
+    try {
+        $leftovers = @(Get-ElevatedLeftoverTask)
+        $BtnCleanupLegacy.Visibility = if ($leftovers.Count -gt 0 -and -not $script:isElevated) {
+            'Visible'
+        } else { 'Collapsed' }
+    } catch { $BtnCleanupLegacy.Visibility = 'Collapsed' }
+}
+
+$BtnCleanupLegacy.Add_Click({
+    $leftovers = @(Get-ElevatedLeftoverTask)
+    if ($leftovers.Count -eq 0) { Update-LegacyCleanupButton; return }
+
+    $names = @($leftovers | ForEach-Object { $_.TaskName })
+    $confirm = [System.Windows.MessageBox]::Show(
+        ("These tasks were created by an older version running as administrator:`n`n  " +
+         ($names -join "`n  ") +
+         "`n`nRemoving them needs administrator approval once. Continue?"),
+        'Remove leftover tasks', 'YesNo', 'Question')
+    if ($confirm -ne 'Yes') { return }
+
+    try {
+        # Returns what is STILL there, so the report describes the end state
+        # rather than the attempt.
+        $remaining = @(Remove-TaskElevated $names)
+        Update-LegacyCleanupButton
+        Refresh-ScheduledList
+        if ($remaining.Count -gt 0) {
+            Show-ErrorBox ("Some tasks could not be removed:`n`n  " + ($remaining -join "`n  "))
+        }
+    } catch {
+        Show-ErrorBox "Cleanup failed: $($_.Exception.Message)"
     }
 })
 
@@ -420,6 +653,9 @@ function Save-TriggerSettings {
             trgDlPath   = $TxtDownloadPath.Text
             trgDlSettle = $TxtSettleSec.Text
             trgDlRec    = [bool]$ChkRecurse.IsChecked
+            trgProcBg   = [bool]$ChkProcBackground.IsChecked
+            trgSigName  = $TxtSignalName.Text
+            trgSigAdv   = [bool]$ChkSignalAdvanced.IsChecked
             trgSigPath  = $TxtSignalPath.Text
             trgResNet   = [bool]$ChkResNet.IsChecked
             trgResKbps  = $TxtResKbps.Text
@@ -447,6 +683,9 @@ function Restore-Settings {
         if ($s.trgDlPath)   { $TxtDownloadPath.Text  = "$($s.trgDlPath)" }
         if ($s.trgDlSettle) { $TxtSettleSec.Text     = "$($s.trgDlSettle)" }
         if ($null -ne $s.trgDlRec)   { $ChkRecurse.IsChecked = [bool]$s.trgDlRec }
+        if ($null -ne $s.trgProcBg) { $ChkProcBackground.IsChecked = [bool]$s.trgProcBg }
+        if ($s.trgSigName)  { $TxtSignalName.Text    = "$($s.trgSigName)" }
+        if ($null -ne $s.trgSigAdv) { $ChkSignalAdvanced.IsChecked = [bool]$s.trgSigAdv }
         if ($s.trgSigPath)  { $TxtSignalPath.Text    = "$($s.trgSigPath)" }
         if ($null -ne $s.trgResNet)  { $ChkResNet.IsChecked = [bool]$s.trgResNet }
         if ($s.trgResKbps)  { $TxtResKbps.Text       = "$($s.trgResKbps)" }
@@ -462,7 +701,11 @@ function Restore-Settings {
 if (-not $TxtDownloadPath.Text) {
     $TxtDownloadPath.Text = Join-Path $env:USERPROFILE 'Downloads'
 }
+if (-not $TxtSignalName.Text) { $TxtSignalName.Text = 'done' }
 if (-not $TxtSignalPath.Text) {
-    $TxtSignalPath.Text = Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals\done.flag'
+    # Only the advanced escape hatch uses this; seeding it from the same folder
+    # means switching to it shows something meaningful rather than an empty box.
+    $TxtSignalPath.Text = Get-SignalPath 'done'
 }
+Update-SignalDisplay
 Update-TriggerKindPanels

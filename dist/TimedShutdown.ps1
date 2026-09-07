@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-04 13:57:03.
+    Built from src\ by build.ps1 on 2026-09-07 06:43:23.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -21,7 +21,12 @@
 # Shown in the header, the tray tooltip, and every log line. NOT in Window.Title:
 # the single-instance guard finds the existing window by exact title, so the
 # title has to stay stable across versions.
-$script:APP_VERSION = '2.3'
+$script:APP_VERSION = '2.4'
+
+# The project root: the folder holding tools\ and TimedShutdown.bat. Both entry
+# points sit one level below it - src\Main.ps1 during development, and
+# dist\TimedShutdown.ps1 for the bundle - so the parent is correct either way.
+$script:AppRoot = Split-Path $PSScriptRoot -Parent
 
 # ═══ begin Interop.ps1 ═════════════════════════════════════════════
 <#
@@ -187,17 +192,19 @@ public class WindowHotkeyManager {
 
 # ═══ end Interop.ps1 ═══════════════════════════════════════════════
 
-# ── Admin check ───────────────────────────────────────────────────────────────
-# Registering SYSTEM-principal scheduled tasks (sleep/hibernate timers and the
-# Schedule tab) needs elevation. TimedShutdown.bat handles the UAC prompt.
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+# ── Privilege ─────────────────────────────────────────────────────────────────
+# There is deliberately no admin gate. Builds up to 2.3 refused to start without
+# elevation, and the sole cause was that every scheduled task was registered
+# under a SYSTEM principal. Tasks now register under the current user, which
+# Authenticated Users may do (they hold Write on %WINDIR%\System32\Tasks), and
+# shutdown / restart / sleep / hibernate all run on a standard token.
+#
+# Elevation is now requested only where it is genuinely required -- the opt-in
+# "run even when I'm signed out" schedule -- and only for that one operation.
+# The flag is recorded here so the UI can skip the elevated round trip when the
+# user happens to be running elevated anyway.
+$script:isElevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) {
-    [System.Windows.MessageBox]::Show(
-        "Administrator privileges are required.`n`nPlease launch via TimedShutdown.bat.",
-        'Administrator Required', 'OK', 'Warning') | Out-Null
-    exit 1
-}
 
 # ── Single instance ───────────────────────────────────────────────────────────
 # Before ANY state mutation: two instances would both tick and fight over
@@ -635,9 +642,22 @@ function Save-Settings ($Settings) { Write-State @{ settings = $Settings } }
 
     Everything here issues CIM calls, so none of it belongs on the dispatcher
     tick -- see Get-TrackedAction in Core/Power.ps1 for the once-a-second path.
+
+    PRIVILEGE. Tasks are registered under the CURRENT USER by default, which
+    needs no elevation: Authenticated Users hold Write on %WINDIR%\System32\Tasks.
+    Builds up to 2.3 always used a SYSTEM principal, which does require
+    elevation, and that single choice was the only reason the whole app demanded
+    UAC. The SYSTEM form is still available, opt-in, for the one thing it buys --
+    firing while nobody is signed in -- and is registered through an elevated
+    child process rather than by elevating the app.
 #>
 
 $script:TASK_FOLDER = '\TimedShutdown'
+
+# Well-known SID for NT AUTHORITY\SYSTEM. Task principals report either the name
+# or the SID depending on how they were registered, so leftover-task detection
+# has to match both.
+$script:SYSTEM_SID = 'S-1-5-18'
 
 function Ensure-TaskFolder {
     $svc = New-Object -ComObject Schedule.Service
@@ -645,6 +665,53 @@ function Ensure-TaskFolder {
     $root = $svc.GetFolder('\')
     try { $root.GetFolder('TimedShutdown') | Out-Null }
     catch { $root.CreateFolder('TimedShutdown') | Out-Null }
+}
+
+<#
+    The principal a task runs as -- the whole of this release's UAC story.
+
+    Current user (default) needs no elevation and fires whenever that user is
+    signed in. A LOCKED workstation still counts: the session exists, so the
+    task runs. Only signing out stops it.
+
+    SYSTEM fires regardless of who is signed in, and registering it REQUIRES
+    elevation. That is the entire trade, and it is why this is a parameter
+    rather than a constant.
+
+    -RunLevel Limited is correct for the current-user form. SetSuspendState and
+    shutdown.exe /s|/r|/h all run on a standard token (Users hold
+    SeShutdownPrivilege by default), so asking for Highest would raise a UAC
+    prompt to buy nothing.
+#>
+function New-TaskPrincipalFor ([bool]$WhenSignedOut = $false) {
+    if ($WhenSignedOut) {
+        return New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+    }
+    return New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" `
+                                      -LogonType Interactive -RunLevel Limited
+}
+
+function Test-IsElevated {
+    return ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+<#
+    Tasks in our folder that run as SYSTEM, which an unelevated process cannot
+    remove.
+
+    Builds up to 2.3 registered every task this way. After the switch to a
+    current-user principal those leftovers remain, and Unregister-ScheduledTask
+    on them fails with access denied -- which would mean Cancel silently not
+    working on the very timer the user wants stopped. Callers use this to say so
+    plainly rather than surfacing a raw CIM error.
+#>
+function Get-ElevatedLeftoverTask {
+    @(Get-ScheduledTask -TaskPath "$($script:TASK_FOLDER)\" -ErrorAction SilentlyContinue |
+      Where-Object {
+          $u = $_.Principal.UserId
+          $u -and ($u -eq $script:SYSTEM_SID -or $u -match '(?i)(^|\)system$')
+      })
 }
 
 <#
@@ -669,7 +736,10 @@ function New-PendingTask ([string]$Name, [string]$Exe, [string]$Arguments, [date
     # missing a required element or attribute ... EndBoundary".
     $t.EndBoundary = $FireAt.AddMinutes(5).ToString('s')
 
-    $p  = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    # Always the current user, never SYSTEM: this task backs a countdown shown
+    # in a window the user is looking at, so they are signed in by definition.
+    # Asking for SYSTEM here would demand elevation to buy nothing.
+    $p  = New-TaskPrincipalFor $false
     $st = New-ScheduledTaskSettingsSet -DeleteExpiredTaskAfter '00:01:00' -ExecutionTimeLimit '00:05:00'
 
     # -ErrorAction Stop is load-bearing: Register-ScheduledTask reports failure
@@ -712,7 +782,15 @@ function Get-ScheduledTaskName {
     return "TS_${ActionType}_${Recurrence}${dayStr}_$($AtTime -replace ':','')"
 }
 
-function Add-ScheduledAction ([string]$ActionType, [string]$Recurrence, [string]$AtTime, [string[]]$DaysOfWeek = @()) {
+<#
+    Registers a user-visible schedule, returning the task name.
+
+    $WhenSignedOut asks for a SYSTEM principal so the action fires even with
+    nobody logged on. That needs elevation, so when this process is not
+    elevated the registration is handed to an elevated child (see
+    Register-TaskElevated) rather than elevating the whole app.
+#>
+function Add-ScheduledAction ([string]$ActionType, [string]$Recurrence, [string]$AtTime, [string[]]$DaysOfWeek = @(), [bool]$WhenSignedOut = $false) {
     Ensure-TaskFolder
     $taskAction = switch ($ActionType) {
         'shutdown'  { New-ScheduledTaskAction -Execute 'shutdown.exe' -Argument '/s /f' }
@@ -727,11 +805,112 @@ function Add-ScheduledAction ([string]$ActionType, [string]$Recurrence, [string]
         'weekly' { New-ScheduledTaskTrigger -Weekly -At $pt -DaysOfWeek $DaysOfWeek }
     }
     $name   = Get-ScheduledTaskName $ActionType $Recurrence $AtTime $DaysOfWeek
-    $pr     = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -RunLevel Highest
+    $pr     = New-TaskPrincipalFor $WhenSignedOut
     $set    = New-ScheduledTaskSettingsSet -ExecutionTimeLimit '00:05:00'
+
+    if ($WhenSignedOut -and -not (Test-IsElevated)) {
+        Register-TaskElevated -Name $name -ActionType $ActionType -Recurrence $Recurrence `
+                              -AtTime $AtTime -DaysOfWeek $DaysOfWeek
+        return $name
+    }
+
     Register-ScheduledTask -TaskName $name -TaskPath "$($script:TASK_FOLDER)\" `
         -Action $taskAction -Trigger $trigger -Principal $pr -Settings $set -Force -ErrorAction Stop | Out-Null
     return $name
+}
+
+<#
+    Registers a SYSTEM task through an elevated child process.
+
+    Elevating the whole app to create one scheduled task is disproportionate, and
+    an elevated window cannot accept drag-and-drop from Explorer, which would
+    break the folder pickers. So the escalation is scoped to this one operation.
+
+    schtasks.exe is driven by its OWN flags rather than by exported task XML.
+    The obvious-looking route - build the task with New-ScheduledTask and hand
+    over $task.XmlText - does not work: New-ScheduledTask returns a CimInstance
+    with no XmlText property at all, so that code would have thrown the first
+    time a user ticked the box. /RU SYSTEM /RL HIGHEST expresses the same intent
+    natively, with no XML and no temp file.
+
+    READING THE RESULT BACK IS THE POINT. schtasks reporting exit 0 is not
+    evidence that a task exists, and this codebase has already shipped two bugs
+    from trusting a success that had not happened. A declined UAC prompt (1223)
+    is an ordinary "no" from the user, reported as such.
+#>
+function Register-TaskElevated {
+    param(
+        [string]   $Name,
+        [string]   $ActionType,
+        [string]   $Recurrence,
+        [string]   $AtTime,
+        [string[]] $DaysOfWeek = @()
+    )
+    $run = switch ($ActionType) {
+        'shutdown'  { 'shutdown.exe /s /f' }
+        'restart'   { 'shutdown.exe /r /f' }
+        'sleep'     { 'rundll32.exe powrprof.dll,SetSuspendState 0,1,0' }
+        'hibernate' { 'shutdown.exe /h' }
+        default     { throw "unknown action type '$ActionType'" }
+    }
+
+    # No hand-written quotes. PowerShell already quotes an argument containing
+    # spaces; adding literal " characters makes schtasks read them as part of the
+    # value and reject the task name outright.
+    $taskArgs = @('/Create', '/TN', "$($script:TASK_FOLDER)\$Name", '/TR', $run,
+                  '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/ST', $AtTime, '/F')
+
+    switch ($Recurrence) {
+        'once' {
+            # schtasks wants /SD as literal mm/dd/yyyy and rejects anything else
+            # ("Invalid Start Date"), so this is deliberately InvariantCulture
+            # and NOT the machine short-date format - the opposite of the usual
+            # rule in this codebase, and verified against schtasks directly.
+            $taskArgs += @('/SC', 'ONCE', '/SD',
+                (Resolve-ScheduleTime $AtTime 'once').ToString('MM/dd/yyyy',
+                    [System.Globalization.CultureInfo]::InvariantCulture))
+        }
+        'daily'  { $taskArgs += @('/SC', 'DAILY') }
+        'weekly' {
+            if (-not $DaysOfWeek -or @($DaysOfWeek).Count -eq 0) {
+                throw 'A weekly schedule needs at least one day.'
+            }
+            $days = (@($DaysOfWeek) | ForEach-Object { $_.Substring(0, 3).ToUpperInvariant() }) -join ','
+            $taskArgs += @('/SC', 'WEEKLY', '/D', $days)
+        }
+        default { throw "unknown recurrence '$Recurrence'" }
+    }
+
+    $proc = Start-Process -FilePath 'schtasks.exe' -Verb RunAs -Wait -PassThru `
+                          -WindowStyle Hidden -ArgumentList $taskArgs
+    if ($proc.ExitCode -eq 1223) {
+        throw 'Administrator approval was declined, so the schedule was not created.'
+    }
+
+    $check = Get-ScheduledTask -TaskName $Name -TaskPath "$($script:TASK_FOLDER)\" -ErrorAction SilentlyContinue
+    if (-not $check) {
+        throw "schtasks exited $($proc.ExitCode) but no task was created."
+    }
+}
+
+<#
+    Removes SYSTEM-principal leftovers via one elevated schtasks call.
+
+    Same verify-don't-trust rule: the caller is told what actually went, not
+    what was attempted.
+#>
+function Remove-TaskElevated ([string[]]$Names) {
+    if (-not $Names -or $Names.Count -eq 0) { return @() }
+    # One elevated shell, one prompt, all deletions.
+    # Here the quotes ARE needed: this string is parsed by cmd.exe, not by
+    # PowerShell's argument builder, and a task path could contain a space.
+    $cmd  = ($Names | ForEach-Object { "schtasks /Delete /TN `"$($script:TASK_FOLDER)\$_`" /F" }) -join ' & '
+    $proc = Start-Process -FilePath 'cmd.exe' -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+                -ArgumentList @('/c', $cmd)
+    if ($proc.ExitCode -eq 1223) { throw 'Administrator approval was declined; nothing was removed.' }
+
+    $remaining = @(Get-ElevatedLeftoverTask | ForEach-Object { $_.TaskName })
+    return $remaining
 }
 
 function Get-ScheduledActionsList {
@@ -908,6 +1087,81 @@ function Reset-CpuSampler { $script:lastCpuIdle = $null; $script:lastCpuBusy = $
 #>
 function Get-IdleSeconds {
     try { return [WinApi]::GetIdleMs() / 1000.0 } catch { return 0.0 }
+}
+
+# ── Process listing ───────────────────────────────────────────────────────────
+
+<#
+    Turns a raw process list into the rows the Triggers tab offers for picking.
+
+    Split from the Get-Process call so it can be tested with fakes, the same way
+    Core/Triggers.ps1 injects GetProcessCount through its context. The rules it
+    encodes are the reason it is worth testing at all:
+
+      * Grouped by NAME, not by PID. That matches the trigger engine, which
+        aggregates by name and treats "exited" as "no instances left" - so the
+        picker must not imply you are choosing one particular window.
+      * Processes owning a visible window sort FIRST. A list led by svchost,
+        dwm and csrss is what made the old free-text box feel like the easier
+        option.
+      * MainWindowTitle is read defensively. Unelevated, some processes deny it,
+        and this app no longer runs elevated.
+#>
+function Get-ProcessChoices ($Processes, [bool]$IncludeBackground = $false) {
+    if (-not $Processes) { return @() }
+
+    $groups = @{}
+    foreach ($p in @($Processes)) {
+        $name = $null
+        try { $name = "$($p.ProcessName)".Trim() } catch { continue }
+        if (-not $name) { continue }
+
+        if (-not $groups.ContainsKey($name)) {
+            $groups[$name] = @{ Name = $name; Count = 0; Title = '' }
+        }
+        $groups[$name].Count++
+
+        if (-not $groups[$name].Title) {
+            # A denial here is normal, not exceptional: it just means this
+            # process contributes no window title to the group.
+            try {
+                $title = "$($p.MainWindowTitle)".Trim()
+                if ($title) { $groups[$name].Title = $title }
+            } catch {}
+        }
+    }
+
+    $rows = foreach ($g in $groups.Values) {
+        [PSCustomObject]@{
+            Name      = $g.Name
+            Count     = $g.Count
+            Title     = $g.Title
+            HasWindow = [bool]$g.Title
+            Display   = Format-ProcessChoice $g.Name $g.Count $g.Title
+        }
+    }
+
+    $rows = @($rows)
+    if (-not $IncludeBackground) { $rows = @($rows | Where-Object { $_.HasWindow }) }
+
+    # Windowed apps first, then alphabetical. Sort-Object is stable, so the two
+    # keys compose rather than fight.
+    return @($rows | Sort-Object -Property @{ Expression = 'HasWindow'; Descending = $true },
+                                           @{ Expression = 'Name';      Descending = $false })
+}
+
+<#
+    One row's label. Long window titles are trimmed rather than allowed to widen
+    the dropdown past the window.
+#>
+function Format-ProcessChoice ([string]$Name, [int]$Count, [string]$Title) {
+    $text = $Name
+    if ($Count -gt 1) { $text += "  ·  $Count running" }
+    if ($Title) {
+        $short = if ($Title.Length -gt 40) { $Title.Substring(0, 39) + '…' } else { $Title }
+        $text += "  ·  $short"
+    }
+    return $text
 }
 
 # ═══ end Core\Guards.ps1 ═══════════════════════════════════════════
@@ -1803,7 +2057,7 @@ function Stop-TimedAction {
         try {
             & $script:RemovePendingTask $t "$($script:TASK_FOLDER)\" | Out-Null
         } catch {
-            $failures += "could not remove ${t}: $($_.Exception.Message)"
+            $failures += Format-TaskRemovalFailure $t $_.Exception.Message
         }
     }
 
@@ -1813,10 +2067,33 @@ function Stop-TimedAction {
         throw "Could not cancel the pending action: $detail"
     }
 
+    $wasPending = if ($s -and $s.pendingAction) { "$($s.pendingAction.type)" } else { 'none' }
+    Write-PowerLog 'action' 'cancelled' "was=$wasPending"
+
     Clear-State
     Disable-KeepAwake
     $script:notifyFired   = $false
     $script:guardBlocking = $false
+}
+
+<#
+    Explains a failed task removal, naming the upgrade case when that is what it is.
+
+    Builds up to 2.3 registered pending tasks under a SYSTEM principal, which
+    required elevation. 2.4 registers them as the current user and no longer
+    elevates - so a task left behind by the older build cannot be removed by
+    this process, and the raw CIM error ("Access is denied") gives the user
+    nothing to act on. A cancel that fails is the one message in this app that
+    must be unambiguous: the user acts on it by walking away from the machine.
+#>
+function Format-TaskRemovalFailure ([string]$TaskName, [string]$Message) {
+    if ($Message -match '(?i)access is denied|0x80070005|unauthorized') {
+        return ("could not remove ${TaskName}: it was created by an older version of " +
+                'Timed Shutdown that ran as administrator, so this (unelevated) copy ' +
+                'cannot remove it. Use Remove leftover tasks on the Scheduled tab, or ' +
+                'delete it from Task Scheduler under \TimedShutdown.')
+    }
+    return "could not remove ${TaskName}: $Message"
 }
 
 <#
@@ -1958,6 +2235,16 @@ $script:XamlCache['MainWindow.xaml'] = @'
     FontFamily="Segoe UI">
 
   <Window.Resources>
+
+    <!--
+      Used by the process picker for BOTH the dropdown list and the closed box.
+      DisplayMemberPath styles only the list: the selection box then falls back
+      to the object's ToString and reads "@{Name=; Display=...}". ItemTemplate is
+      mirrored into SelectionBoxItemTemplate, so one template covers both.
+    -->
+    <DataTemplate x:Key="ProcessChoiceTemplate">
+      <TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis"/>
+    </DataTemplate>
 
     <Style TargetType="ScrollBar">
       <Setter Property="Background" Value="Transparent"/>
@@ -2440,7 +2727,7 @@ $script:XamlCache['MainWindow.xaml'] = @'
           <ComboBox Grid.Row="1" x:Name="CmbTriggerKind" Height="34" Margin="0,0,0,14"
                     Background="#2A2A3E" Foreground="#CDD6F4" BorderBrush="#45475A"
                     VerticalContentAlignment="Center" FontSize="13">
-            <ComboBoxItem Content="A process exits"/>
+            <ComboBoxItem Content="A process exits" IsSelected="True"/>
             <ComboBoxItem Content="Downloads finish"/>
             <ComboBoxItem Content="A signal file appears"/>
             <ComboBoxItem Content="Network / CPU go quiet"/>
@@ -2463,22 +2750,45 @@ $script:XamlCache['MainWindow.xaml'] = @'
                              VerticalAlignment="Center" IsHitTestVisible="False"/>
                 </Grid>
               </Border>
+              <!--
+                The picker ADDS to the box, it does not replace it. Arming for a
+                process that is not running yet is a supported case (the engine
+                waits for it to start), and a picker alone would remove it.
+              -->
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <ComboBox Grid.Column="0" x:Name="CmbProcPick" Height="30" FontSize="12"
+                          ItemTemplate="{StaticResource ProcessChoiceTemplate}"/>
+                <CheckBox Grid.Column="1" x:Name="ChkProcBackground" Content="background too"
+                          FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+              </Grid>
               <StackPanel Orientation="Horizontal">
                 <RadioButton x:Name="RbProcAll" Content="all have exited" IsChecked="True"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
-                <RadioButton x:Name="RbProcAny" Content="any one exits"
-                             Foreground="#BAC2DE" FontSize="12"/>
+                             Margin="0,0,14,0"/>
+                <RadioButton x:Name="RbProcAny" Content="any one exits"/>
               </StackPanel>
             </StackPanel>
 
             <StackPanel x:Name="CfgDownloads" Visibility="Collapsed">
               <TextBlock Text="WATCH FOLDER" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
-              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
-                      BorderThickness="1" Height="34" Margin="0,0,0,8">
-                <TextBox x:Name="TxtDownloadPath" Background="Transparent" BorderThickness="0"
-                         Foreground="#CDD6F4" FontSize="12" Padding="10,0"
-                         VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
-              </Border>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                        BorderThickness="1" Height="34">
+                  <TextBox x:Name="TxtDownloadPath" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <Button Grid.Column="1" x:Name="BtnBrowseDownload" Content="Browse"
+                        Style="{StaticResource SecondaryBtn}" Padding="12,7"
+                        FontSize="12" Margin="8,0,0,0"/>
+              </Grid>
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="settle" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
                 <Border Background="#2A2A3E" CornerRadius="4" Width="46" Height="24" Margin="8,0,8,0"
@@ -2493,9 +2803,28 @@ $script:XamlCache['MainWindow.xaml'] = @'
             </StackPanel>
 
             <StackPanel x:Name="CfgSignal" Visibility="Collapsed">
-              <TextBlock Text="SIGNAL FILE  (deleted when detected)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
-              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
-                      BorderThickness="1" Height="34" Margin="0,0,0,6">
+              <TextBlock Text="SIGNAL NAME  (deleted when detected)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Grid Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                        BorderThickness="1" Height="34">
+                  <TextBox x:Name="TxtSignalName" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <Button Grid.Column="1" x:Name="BtnCopySignalCmd" Content="Copy command"
+                        Style="{StaticResource SecondaryBtn}" Padding="12,7"
+                        FontSize="12" Margin="8,0,0,0"/>
+              </Grid>
+              <TextBlock x:Name="LblSignalResolved" Text="" Foreground="#6C7086"
+                         FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"/>
+              <CheckBox x:Name="ChkSignalAdvanced" Content="use a full path instead"
+                        FontSize="11" Margin="0,0,0,6"/>
+              <Border x:Name="PanelSignalPath" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34" Margin="0,0,0,6" Visibility="Collapsed">
                 <TextBox x:Name="TxtSignalPath" Background="Transparent" BorderThickness="0"
                          Foreground="#CDD6F4" FontSize="12" Padding="10,0"
                          VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
@@ -2527,10 +2856,8 @@ $script:XamlCache['MainWindow.xaml'] = @'
                 <TextBlock Text="%" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
               </StackPanel>
               <StackPanel Orientation="Horizontal">
-                <RadioButton x:Name="RbResAll" Content="all enabled" IsChecked="True"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,12,0"/>
-                <RadioButton x:Name="RbResAny" Content="any enabled"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
+                <RadioButton x:Name="RbResAll" Content="all enabled" IsChecked="True" Margin="0,0,12,0"/>
+                <RadioButton x:Name="RbResAny" Content="any enabled" Margin="0,0,14,0"/>
                 <TextBlock Text="for" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
                 <Border Background="#2A2A3E" CornerRadius="4" Width="50" Height="24" Margin="6,0,6,0"
                         BorderBrush="#45475A" BorderThickness="1">
@@ -2685,7 +3012,15 @@ $script:XamlCache['MainWindow.xaml'] = @'
             <Button x:Name="BtnAddSchedule" Content="+ Add"
                     Style="{StaticResource SecondaryBtn}" Padding="16,9" Margin="0,0,8,0"/>
             <Button x:Name="BtnRemoveSchedule" Content="- Remove"
-                    Style="{StaticResource DangerBtn}" Padding="16,9"/>
+                    Style="{StaticResource DangerBtn}" Padding="16,9" Margin="0,0,8,0"/>
+            <!--
+              Only shown when there is something to clean up: tasks left by a
+              pre-2.4 build, which ran as administrator and registered them
+              under SYSTEM. This copy is unelevated and cannot remove them.
+            -->
+            <Button x:Name="BtnCleanupLegacy" Content="Remove leftover tasks"
+                    Style="{StaticResource SecondaryBtn}" Padding="12,9"
+                    FontSize="12" Visibility="Collapsed"/>
           </StackPanel>
         </Grid>
       </TabItem>
@@ -2700,7 +3035,7 @@ $script:XamlCache['ScheduleDialog.xaml'] = @'
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Title="Add Scheduled Action"
-    Width="340" Height="340"
+    Width="340" Height="412"
     ResizeMode="NoResize"
     WindowStartupLocation="CenterOwner"
     Background="#1E1E2E"
@@ -2711,15 +3046,6 @@ $script:XamlCache['ScheduleDialog.xaml'] = @'
       <Setter Property="FontSize" Value="10"/>
       <Setter Property="FontWeight" Value="SemiBold"/>
       <Setter Property="Margin" Value="0,0,0,6"/>
-    </Style>
-    <Style x:Key="InputBox" TargetType="ComboBox">
-      <Setter Property="Background" Value="#2A2A3E"/>
-      <Setter Property="Foreground" Value="#CDD6F4"/>
-      <Setter Property="BorderBrush" Value="#45475A"/>
-      <Setter Property="BorderThickness" Value="1"/>
-      <Setter Property="Height" Value="36"/>
-      <Setter Property="Padding" Value="10,0"/>
-      <Setter Property="FontSize" Value="13"/>
     </Style>
     <Style x:Key="DayToggle" TargetType="ToggleButton">
       <Setter Property="Background" Value="#2A2A3E"/>
@@ -2817,14 +3143,14 @@ $script:XamlCache['ScheduleDialog.xaml'] = @'
       <RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
     <TextBlock Grid.Row="0" Text="ACTION" Style="{StaticResource FieldLabel}"/>
-    <ComboBox Grid.Row="0" x:Name="CmbAction" Style="{StaticResource InputBox}" Margin="0,16,0,14">
+    <ComboBox Grid.Row="0" x:Name="CmbAction" Height="36" Margin="0,16,0,14">
       <ComboBoxItem Content="Shutdown" IsSelected="True"/>
       <ComboBoxItem Content="Restart"/>
       <ComboBoxItem Content="Sleep"/>
       <ComboBoxItem Content="Hibernate"/>
     </ComboBox>
     <TextBlock Grid.Row="1" Text="RECURRENCE" Style="{StaticResource FieldLabel}"/>
-    <ComboBox Grid.Row="1" x:Name="CmbRecurrence" Style="{StaticResource InputBox}" Margin="0,16,0,14">
+    <ComboBox Grid.Row="1" x:Name="CmbRecurrence" Height="36" Margin="0,16,0,14">
       <ComboBoxItem Content="Once" IsSelected="True"/>
       <ComboBoxItem Content="Daily"/>
       <ComboBoxItem Content="Weekly"/>
@@ -2848,8 +3174,20 @@ $script:XamlCache['ScheduleDialog.xaml'] = @'
                BorderThickness="0" Padding="10,0" FontSize="13"
                VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
     </Border>
-    <TextBlock Grid.Row="4" x:Name="LblDlgError" Text=""
-               Foreground="#F38BA8" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    <StackPanel Grid.Row="4">
+      <!--
+        The one thing in this app that still needs administrator rights, asked
+        for at the moment it is used rather than for the whole session. Off by
+        default: a task registered as the current user needs no elevation and
+        fires whenever that user is signed in, which covers the normal case.
+      -->
+      <CheckBox x:Name="ChkWhenSignedOut" Margin="0,0,0,8"
+                Content="Run even when I am signed out"/>
+      <TextBlock x:Name="LblSignedOutHint" Text="Asks for administrator approval once, when you press Create."
+                 Foreground="#6C7086" FontSize="11" TextWrapping="Wrap" Margin="23,-4,0,8"/>
+      <TextBlock x:Name="LblDlgError" Text=""
+                 Foreground="#F38BA8" FontSize="12" TextWrapping="Wrap" Margin="0,0,0,8"/>
+    </StackPanel>
     <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right">
       <Button x:Name="BtnDlgCancel" Content="Cancel"
               Style="{StaticResource SecondaryBtn}" Padding="16,9" Margin="0,0,8,0"/>
@@ -2859,12 +3197,231 @@ $script:XamlCache['ScheduleDialog.xaml'] = @'
   </Grid>
 </Window>
 '@
+$script:XamlCache['Theme.xaml'] = @'
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    UI/Theme.xaml - control templates shared by every window.
 
+    These three controls were the only ones in the app still rendering with the
+    stock Aero theme, and the ComboBox is why the "wait for" menu was unreadable.
+    The Aero template IGNORES the Background set on a ComboBox and paints its
+    dropdown popup with SystemColors.WindowBrush: white. The pale #CDD6F4
+    foreground then sat on white. Setting properties cannot fix that; only
+    replacing the template can, which is what this file does.
+
+    RULES FOR THIS FILE
+
+      * Self-contained. UI/Xaml.ps1 splices these entries in BEFORE each window
+        declares its own resources, so a {StaticResource} pointing at something
+        defined in MainWindow.xaml would not yet resolve. Everything referenced
+        here must be defined here.
+      * PART_Popup is load-bearing, not decorative: ComboBox looks that name up
+        to find its dropdown. Same rule as PART_SelectedContentHost on the
+        TabControl: rename it and the control silently stops working.
+      * The popup Border sets its own Background explicitly. Inheriting it is
+        precisely the bug being fixed.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+  <!-- Chrome for the ComboBox drop-down button: the box itself, plus a chevron. -->
+  <ControlTemplate x:Key="TsComboToggle" TargetType="ToggleButton">
+    <Border x:Name="Bd"
+            Background="{Binding Background, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+            BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType=ComboBox}}"
+            BorderThickness="1" CornerRadius="6" SnapsToDevicePixels="True">
+      <Path x:Name="Arrow" Data="M 0 0 L 4 4 L 8 0 Z" Fill="#9399B2"
+            HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0"/>
+    </Border>
+    <ControlTemplate.Triggers>
+      <Trigger Property="IsMouseOver" Value="True">
+        <Setter TargetName="Bd"    Property="BorderBrush" Value="#7C9DDA"/>
+        <Setter TargetName="Arrow" Property="Fill"        Value="#CDD6F4"/>
+      </Trigger>
+      <Trigger Property="IsChecked" Value="True">
+        <Setter TargetName="Bd"    Property="BorderBrush" Value="#7C9DDA"/>
+        <Setter TargetName="Arrow" Property="Fill"        Value="#CDD6F4"/>
+      </Trigger>
+    </ControlTemplate.Triggers>
+  </ControlTemplate>
+
+  <Style TargetType="ComboBox">
+    <Setter Property="Background"          Value="#2A2A3E"/>
+    <Setter Property="Foreground"          Value="#CDD6F4"/>
+    <Setter Property="BorderBrush"         Value="#45475A"/>
+    <Setter Property="BorderThickness"     Value="1"/>
+    <Setter Property="Height"              Value="34"/>
+    <Setter Property="FontSize"            Value="13"/>
+    <Setter Property="Padding"             Value="12,0,28,0"/>
+    <Setter Property="Cursor"              Value="Hand"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBox">
+          <Grid>
+            <!-- Toggle first so the content draws on top of it. The content is
+                 not hit-test visible, so a click anywhere opens the list. -->
+            <ToggleButton x:Name="TsToggle" Focusable="False" ClickMode="Press"
+                          Template="{StaticResource TsComboToggle}"
+                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay,
+                                      RelativeSource={RelativeSource TemplatedParent}}"/>
+            <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False"
+                              Content="{TemplateBinding SelectionBoxItem}"
+                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                              ContentStringFormat="{TemplateBinding SelectionBoxItemStringFormat}"
+                              Margin="{TemplateBinding Padding}"
+                              VerticalAlignment="Center" HorizontalAlignment="Left"/>
+            <Popup x:Name="PART_Popup" Placement="Bottom" AllowsTransparency="True"
+                   Focusable="False" PopupAnimation="Fade"
+                   IsOpen="{TemplateBinding IsDropDownOpen}">
+              <Border Background="#2A2A3E" BorderBrush="#45475A" BorderThickness="1"
+                      CornerRadius="6" Margin="0,3,0,0" SnapsToDevicePixels="True"
+                      MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}"
+                      MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                <ScrollViewer VerticalScrollBarVisibility="Auto" Margin="0,4,0,4">
+                  <ItemsPresenter KeyboardNavigation.DirectionalNavigation="Contained"/>
+                </ScrollViewer>
+              </Border>
+            </Popup>
+          </Grid>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter TargetName="ContentSite" Property="Opacity" Value="0.45"/>
+              <Setter TargetName="TsToggle"    Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="ComboBoxItem">
+    <Setter Property="Foreground"          Value="#CDD6F4"/>
+    <Setter Property="FontSize"            Value="13"/>
+    <Setter Property="Padding"             Value="12,7"/>
+    <Setter Property="Cursor"              Value="Hand"/>
+    <Setter Property="SnapsToDevicePixels" Value="True"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="ComboBoxItem">
+          <Border x:Name="Bd" Background="Transparent" CornerRadius="4"
+                  Margin="4,1" Padding="{TemplateBinding Padding}"
+                  SnapsToDevicePixels="True">
+            <ContentPresenter VerticalAlignment="Center"/>
+          </Border>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsHighlighted" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#45475A"/>
+            </Trigger>
+            <Trigger Property="IsSelected" Value="True">
+              <Setter TargetName="Bd" Property="Background" Value="#7C9DDA"/>
+              <Setter Property="Foreground" Value="#1E1E2E"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Foreground" Value="#6C7086"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+  <Style TargetType="RadioButton">
+    <Setter Property="Foreground" Value="#BAC2DE"/>
+    <Setter Property="FontSize"   Value="12"/>
+    <Setter Property="Cursor"     Value="Hand"/>
+    <Setter Property="Template">
+      <Setter.Value>
+        <ControlTemplate TargetType="RadioButton">
+          <StackPanel Orientation="Horizontal" Background="Transparent">
+            <Grid Width="16" Height="16" VerticalAlignment="Center" Margin="0,0,7,0">
+              <Ellipse x:Name="Ring" Stroke="#45475A" StrokeThickness="1.5" Fill="#2A2A3E"/>
+              <Ellipse x:Name="Dot"  Width="7" Height="7" Fill="#7C9DDA" Visibility="Collapsed"/>
+            </Grid>
+            <ContentPresenter VerticalAlignment="Center" RecognizesAccessKey="True"/>
+          </StackPanel>
+          <ControlTemplate.Triggers>
+            <Trigger Property="IsChecked" Value="True">
+              <Setter TargetName="Ring" Property="Stroke"     Value="#7C9DDA"/>
+              <Setter TargetName="Dot"  Property="Visibility" Value="Visible"/>
+            </Trigger>
+            <Trigger Property="IsMouseOver" Value="True">
+              <Setter TargetName="Ring" Property="Stroke"     Value="#7C9DDA"/>
+              <Setter Property="Foreground" Value="#CDD6F4"/>
+            </Trigger>
+            <Trigger Property="IsEnabled" Value="False">
+              <Setter Property="Opacity" Value="0.45"/>
+            </Trigger>
+          </ControlTemplate.Triggers>
+        </ControlTemplate>
+      </Setter.Value>
+    </Setter>
+  </Style>
+
+</ResourceDictionary>
+'@
+
+# Control templates every window shares. Spliced into each document's
+# <Window.Resources> by Import-XamlDocument, so there is one copy rather than one
+# per window.
+$script:THEME_XAML = 'Theme.xaml'
+
+$script:WPF_NS  = 'http://schemas.microsoft.com/winfx/2006/xaml/presentation'
+
+# Test seam: point markup loading at a source tree other than this module's own
+# directory. Same shape as Set-StateFilePath and Set-LogFilePath.
+function Set-XamlRoot ([string]$Path) { $script:XamlRoot = $Path }
+
+<#
+    Reads one .xaml document, with the shared theme merged in.
+
+    The merge happens HERE rather than in New-XamlWindow so that every consumer
+    of a document - the app and the markup tests alike - sees exactly what WPF
+    will be handed. A test that parsed the raw file would be checking markup the
+    application never actually loads.
+
+    Order matters: shared entries go FIRST, so a window that wants to override
+    one can simply declare its own afterwards and win. It also means Theme.xaml
+    cannot reference a window's resources, which is why that file is documented
+    as self-contained.
+#>
 function Import-XamlDocument ([string]$Name) {
+    $doc = Read-XamlDocument $Name
+    if ($Name -ne $script:THEME_XAML) { Merge-SharedResource $doc }
+    return $doc
+}
+
+function Read-XamlDocument ([string]$Name) {
     if ($script:XamlCache.ContainsKey($Name)) { return [xml]$script:XamlCache[$Name] }
     $path = Join-Path $script:XamlRoot $Name
     if (-not (Test-Path $path)) { throw "XAML resource not found: $path" }
     return [xml](Get-Content $path -Raw -Encoding UTF8)
+}
+
+<#
+    Copies Theme.xaml's entries into $Doc's <Window.Resources>.
+
+    InsertBefore against a FIXED reference node appends in source order: each new
+    node lands immediately before the window's original first entry, and so after
+    the ones already inserted. Inserting before a moving "current first" would
+    silently reverse them.
+#>
+function Merge-SharedResource ([xml]$Doc) {
+    $nsm = New-Object System.Xml.XmlNamespaceManager($Doc.NameTable)
+    $nsm.AddNamespace('d', $script:WPF_NS)
+
+    $resNode = $Doc.SelectSingleNode('/d:Window/d:Window.Resources', $nsm)
+    if (-not $resNode) { throw 'Window has no <Window.Resources> to merge shared styles into.' }
+
+    $theme  = Read-XamlDocument $script:THEME_XAML
+    $anchor = $resNode.FirstChild
+
+    foreach ($child in @($theme.DocumentElement.ChildNodes)) {
+        if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+        [void]$resNode.InsertBefore($Doc.ImportNode($child, $true), $anchor)
+    }
 }
 
 function New-XamlWindow ([string]$Name) {
@@ -2925,9 +3482,17 @@ $TxtProcNames       = $window.FindName('TxtProcNames')
 $TxtProcNamesPlaceholder = $window.FindName('TxtProcNamesPlaceholder')
 $RbProcAll          = $window.FindName('RbProcAll')
 $RbProcAny          = $window.FindName('RbProcAny')
+$CmbProcPick        = $window.FindName('CmbProcPick')
+$ChkProcBackground  = $window.FindName('ChkProcBackground')
 $TxtDownloadPath    = $window.FindName('TxtDownloadPath')
+$BtnBrowseDownload  = $window.FindName('BtnBrowseDownload')
 $TxtSettleSec       = $window.FindName('TxtSettleSec')
 $ChkRecurse         = $window.FindName('ChkRecurse')
+$TxtSignalName      = $window.FindName('TxtSignalName')
+$BtnCopySignalCmd   = $window.FindName('BtnCopySignalCmd')
+$LblSignalResolved  = $window.FindName('LblSignalResolved')
+$ChkSignalAdvanced  = $window.FindName('ChkSignalAdvanced')
+$PanelSignalPath    = $window.FindName('PanelSignalPath')
 $TxtSignalPath      = $window.FindName('TxtSignalPath')
 $ChkResNet          = $window.FindName('ChkResNet')
 $TxtResKbps         = $window.FindName('TxtResKbps')
@@ -2952,6 +3517,7 @@ $BtnGraceSnooze     = $window.FindName('BtnGraceSnooze')
 $BtnTriggerArm      = $window.FindName('BtnTriggerArm')
 $LvScheduled        = $window.FindName('LvScheduled')
 $BtnAddSchedule     = $window.FindName('BtnAddSchedule')
+$BtnCleanupLegacy   = $window.FindName('BtnCleanupLegacy')
 $BtnRemoveSchedule  = $window.FindName('BtnRemoveSchedule')
 
 # ── UI-scope state ────────────────────────────────────────────────────────────
@@ -3016,6 +3582,83 @@ function Set-TriggerActionSelection ([string]$action) {
     foreach ($key in $map.Keys) { $map[$key].IsChecked = ($key -eq $action) }
 }
 
+<#
+    Where a named signal lives.
+
+    Deliberately the same folder tools\TimedShutdown-signal.cmd writes to. The
+    name is the contract between the two: a user types "done" here and runs
+    "TimedShutdown-signal.cmd done" from a script, and neither side has to know
+    the path. Get-SignalPath is the single place that mapping exists.
+#>
+# Test seam, same shape as Set-StateFilePath / Set-LogFilePath: a test must be
+# able to resolve signal paths without touching a live install.
+$script:SIGNAL_DIR = $null
+function Set-SignalDir ([string]$Path) { $script:SIGNAL_DIR = $Path }
+
+function Get-SignalDir {
+    if ($script:SIGNAL_DIR) { return $script:SIGNAL_DIR }
+    return Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals'
+}
+
+<#
+    Creates the signal folder if it is not there yet.
+
+    Without this, arming a named signal on a fresh install was REFUSED with
+    "Folder does not exist" - the folder is only created when the signal tool
+    first runs, and the whole point is to arm the trigger BEFORE the job that
+    signals it. It passed in development purely because the folder already
+    existed on that machine; CI on a clean runner caught it.
+
+    -ErrorAction Stop is load-bearing: New-Item reports a bad path as a
+    NON-terminating error, so without it the caller's try/catch never fires and
+    validation would pass on a folder that was never created.
+#>
+function Initialize-SignalDir {
+    $dir = Get-SignalDir
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force -ErrorAction Stop | Out-Null
+    }
+    return $dir
+}
+
+function Get-SignalPath ([string]$Name) {
+    return Join-Path (Get-SignalDir) "$Name.flag"
+}
+
+# The name goes into a filename, so refuse anything that is not one. Rejecting
+# early beats a confusing failure when the trigger tries to watch the path.
+function Test-SignalName ([string]$Name) {
+    if (-not $Name) { return $false }
+    if ($Name.Length -gt 64) { return $false }
+    return $Name -match '^[A-Za-z0-9._-]+$'
+}
+
+<#
+    The signal file the UI is currently configured for, honouring the
+    advanced "use a full path instead" escape hatch.
+#>
+function Get-ConfiguredSignalPath {
+    if ($ChkSignalAdvanced.IsChecked) { return $TxtSignalPath.Text.Trim() }
+    return Get-SignalPath ($TxtSignalName.Text.Trim())
+}
+
+function Update-SignalDisplay {
+    $advanced = [bool]$ChkSignalAdvanced.IsChecked
+    $PanelSignalPath.Visibility = if ($advanced) { 'Visible' } else { 'Collapsed' }
+    $BtnCopySignalCmd.IsEnabled = -not $advanced
+
+    if ($advanced) {
+        $LblSignalResolved.Text = ''
+        return
+    }
+    $name = $TxtSignalName.Text.Trim()
+    $LblSignalResolved.Text = if (Test-SignalName $name) {
+        Get-SignalPath $name
+    } else {
+        'Use letters, digits, dot, dash or underscore.'
+    }
+}
+
 function Get-SelectedTriggerKind {
     $i = [math]::Max(0, $CmbTriggerKind.SelectedIndex)
     return $script:triggerKinds[$i]
@@ -3058,7 +3701,17 @@ function Get-TriggerConfigFromUi {
             return @{ Path = $path; SettleSec = $settle; Recurse = [bool]$ChkRecurse.IsChecked }
         }
         'signal' {
-            $path = $TxtSignalPath.Text.Trim()
+            if (-not $ChkSignalAdvanced.IsChecked) {
+                if (-not (Test-SignalName $TxtSignalName.Text.Trim())) {
+                    throw "Enter a signal name using letters, digits, dot, dash or underscore.`n`nFor example:  done"
+                }
+                # The app owns this folder, so it creates it rather than refusing.
+                # A full path typed by the user is a different matter: that one is
+                # still checked, never created.
+                try { Initialize-SignalDir | Out-Null }
+                catch { throw "Could not create the signal folder:`n$($_.Exception.Message)" }
+            }
+            $path = Get-ConfiguredSignalPath
             if (-not $path) { throw 'Enter a signal file path.' }
             $dir = Split-Path $path -Parent
             if ($dir -and -not (Test-Path -LiteralPath $dir)) { throw "Folder does not exist:`n$dir" }
@@ -3204,6 +3857,100 @@ $TxtProcNames.Add_TextChanged({
         if ([string]::IsNullOrEmpty($TxtProcNames.Text)) { 'Visible' } else { 'Collapsed' }
 })
 
+# ── Process picker ────────────────────────────────────────────────────────────
+
+<#
+    Refills the picker from the live process list.
+
+    Bound to DropDownOpened, NOT to the dispatcher tick: enumerating processes
+    costs 50-150 ms, and the tick has a hard rule against work of that size. It
+    also means the list is always current at the moment it is read, with no
+    cache to go stale.
+#>
+function Update-ProcessPicker {
+    $prompt = [PSCustomObject]@{ Name = ''; Display = 'Pick a running process…' }
+    $rows   = @()
+    try {
+        $rows = @(Get-ProcessChoices (Get-Process -ErrorAction SilentlyContinue) `
+                                     ([bool]$ChkProcBackground.IsChecked))
+    } catch {}
+
+    # ItemTemplate comes from the markup; setting DisplayMemberPath as well
+    # would throw, and would not fix the closed box in any case.
+    $CmbProcPick.ItemsSource   = @($prompt) + $rows
+    $CmbProcPick.SelectedIndex = 0
+}
+
+<#
+    Appends the picked name to the text box.
+
+    The box stays the source of truth - the picker only saves typing - so this
+    de-duplicates against what is already there rather than replacing it, and
+    resets the selection so the control reads as an action rather than a
+    current value.
+#>
+function Add-PickedProcess {
+    $item = $CmbProcPick.SelectedItem
+    if (-not $item -or -not $item.Name) { return }
+
+    $existing = @($TxtProcNames.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($existing -notcontains $item.Name) {
+        $existing += $item.Name
+        $TxtProcNames.Text = ($existing -join ', ')
+    }
+    $CmbProcPick.SelectedIndex = 0
+}
+
+# Seed with just the prompt so the control reads as a labelled action rather
+# than an empty box. The real list is built on open.
+$CmbProcPick.ItemsSource   = @([PSCustomObject]@{ Name = ''; Display = 'Pick a running process…' })
+$CmbProcPick.SelectedIndex = 0
+
+$CmbProcPick.Add_DropDownOpened({ Update-ProcessPicker })
+$CmbProcPick.Add_SelectionChanged({ Add-PickedProcess })
+$ChkProcBackground.Add_Click({ Update-ProcessPicker })
+
+# ── Path pickers ──────────────────────────────────────────────────────────────
+# The app no longer runs elevated, so these dialogs can interact with an
+# unelevated Explorer normally. Validation stays in Get-TriggerConfigFromUi:
+# a picker is a convenience, never a second source of truth.
+
+$BtnBrowseDownload.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = 'Folder to watch for downloads'
+    $current = $TxtDownloadPath.Text.Trim()
+    if ($current -and (Test-Path -LiteralPath $current)) { $dlg.SelectedPath = $current }
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $TxtDownloadPath.Text = $dlg.SelectedPath
+    }
+    $dlg.Dispose()
+})
+
+$ChkSignalAdvanced.Add_Click({ Update-SignalDisplay })
+$TxtSignalName.Add_TextChanged({ Update-SignalDisplay })
+
+<#
+    Puts the exact command on the clipboard.
+
+    The whole point of naming signals is that the user never has to reason about
+    where the flag file goes; handing them the literal line to paste into a hook
+    or build script is what closes that loop.
+#>
+$BtnCopySignalCmd.Add_Click({
+    $name = $TxtSignalName.Text.Trim()
+    if (-not (Test-SignalName $name)) {
+        Show-ErrorBox "Enter a signal name first.`n`nLetters, digits, dot, dash or underscore - for example:  done"
+        return
+    }
+    $tool = Join-Path $script:AppRoot 'tools\TimedShutdown-signal.cmd'
+    try {
+        [System.Windows.Clipboard]::SetText("`"$tool`" $name")
+        $LblSignalResolved.Text = 'Copied. Paste it wherever your job finishes.'
+    } catch {
+        Show-ErrorBox "Could not write to the clipboard: $($_.Exception.Message)"
+    }
+})
+
 $TxtIdleTime.Add_TextChanged({
     $TxtIdlePlaceholder.Visibility =
         if ([string]::IsNullOrEmpty($TxtIdleTime.Text)) { 'Visible' } else { 'Collapsed' }
@@ -3246,7 +3993,8 @@ $BtnGraceSnooze.Add_Click({
 # Refresh the task list when the Scheduled tab is opened rather than on a timer.
 $MainTabs.Add_SelectionChanged({
     if ($MainTabs.SelectedIndex -eq 2) {
-        try { Refresh-ScheduledList } catch {}
+        try { Refresh-ScheduledList }        catch {}
+        try { Update-LegacyCleanupButton }   catch {}
     }
 })
 
@@ -3254,9 +4002,51 @@ $BtnAddSchedule.Add_Click({
     $res = Show-AddScheduleDialog $window
     if ($null -ne $res) {
         try {
-            Add-ScheduledAction $res.ActionType $res.Recurrence $res.AtTime $res.DaysOfWeek | Out-Null
+            Add-ScheduledAction $res.ActionType $res.Recurrence $res.AtTime $res.DaysOfWeek `
+                                $res.WhenSignedOut | Out-Null
             Refresh-ScheduledList
         } catch { Show-ErrorBox "Failed to create scheduled task: $_" }
+    }
+})
+
+<#
+    Shows the cleanup button only when leftovers actually exist.
+
+    Called when the Scheduled tab is opened rather than on a timer: enumerating
+    tasks is a CIM query and has no business on the dispatcher tick.
+#>
+function Update-LegacyCleanupButton {
+    try {
+        $leftovers = @(Get-ElevatedLeftoverTask)
+        $BtnCleanupLegacy.Visibility = if ($leftovers.Count -gt 0 -and -not $script:isElevated) {
+            'Visible'
+        } else { 'Collapsed' }
+    } catch { $BtnCleanupLegacy.Visibility = 'Collapsed' }
+}
+
+$BtnCleanupLegacy.Add_Click({
+    $leftovers = @(Get-ElevatedLeftoverTask)
+    if ($leftovers.Count -eq 0) { Update-LegacyCleanupButton; return }
+
+    $names = @($leftovers | ForEach-Object { $_.TaskName })
+    $confirm = [System.Windows.MessageBox]::Show(
+        ("These tasks were created by an older version running as administrator:`n`n  " +
+         ($names -join "`n  ") +
+         "`n`nRemoving them needs administrator approval once. Continue?"),
+        'Remove leftover tasks', 'YesNo', 'Question')
+    if ($confirm -ne 'Yes') { return }
+
+    try {
+        # Returns what is STILL there, so the report describes the end state
+        # rather than the attempt.
+        $remaining = @(Remove-TaskElevated $names)
+        Update-LegacyCleanupButton
+        Refresh-ScheduledList
+        if ($remaining.Count -gt 0) {
+            Show-ErrorBox ("Some tasks could not be removed:`n`n  " + ($remaining -join "`n  "))
+        }
+    } catch {
+        Show-ErrorBox "Cleanup failed: $($_.Exception.Message)"
     }
 })
 
@@ -3295,6 +4085,9 @@ function Save-TriggerSettings {
             trgDlPath   = $TxtDownloadPath.Text
             trgDlSettle = $TxtSettleSec.Text
             trgDlRec    = [bool]$ChkRecurse.IsChecked
+            trgProcBg   = [bool]$ChkProcBackground.IsChecked
+            trgSigName  = $TxtSignalName.Text
+            trgSigAdv   = [bool]$ChkSignalAdvanced.IsChecked
             trgSigPath  = $TxtSignalPath.Text
             trgResNet   = [bool]$ChkResNet.IsChecked
             trgResKbps  = $TxtResKbps.Text
@@ -3322,6 +4115,9 @@ function Restore-Settings {
         if ($s.trgDlPath)   { $TxtDownloadPath.Text  = "$($s.trgDlPath)" }
         if ($s.trgDlSettle) { $TxtSettleSec.Text     = "$($s.trgDlSettle)" }
         if ($null -ne $s.trgDlRec)   { $ChkRecurse.IsChecked = [bool]$s.trgDlRec }
+        if ($null -ne $s.trgProcBg) { $ChkProcBackground.IsChecked = [bool]$s.trgProcBg }
+        if ($s.trgSigName)  { $TxtSignalName.Text    = "$($s.trgSigName)" }
+        if ($null -ne $s.trgSigAdv) { $ChkSignalAdvanced.IsChecked = [bool]$s.trgSigAdv }
         if ($s.trgSigPath)  { $TxtSignalPath.Text    = "$($s.trgSigPath)" }
         if ($null -ne $s.trgResNet)  { $ChkResNet.IsChecked = [bool]$s.trgResNet }
         if ($s.trgResKbps)  { $TxtResKbps.Text       = "$($s.trgResKbps)" }
@@ -3337,9 +4133,13 @@ function Restore-Settings {
 if (-not $TxtDownloadPath.Text) {
     $TxtDownloadPath.Text = Join-Path $env:USERPROFILE 'Downloads'
 }
+if (-not $TxtSignalName.Text) { $TxtSignalName.Text = 'done' }
 if (-not $TxtSignalPath.Text) {
-    $TxtSignalPath.Text = Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals\done.flag'
+    # Only the advanced escape hatch uses this; seeding it from the same folder
+    # means switching to it shows something meaningful rather than an empty box.
+    $TxtSignalPath.Text = Get-SignalPath 'done'
 }
+Update-SignalDisplay
 Update-TriggerKindPanels
 
 # ═══ end UI\MainWindow.ps1 ═════════════════════════════════════════
@@ -3349,6 +4149,10 @@ Update-TriggerKindPanels
 
     Returns a hashtable of the chosen settings, or $null when cancelled. Creating
     the task is the caller's job (Add-ScheduledAction in Core/Scheduler.ps1).
+
+    WhenSignedOut asks for a SYSTEM principal, which requires elevation. This
+    dialog only records the choice; Add-ScheduledAction decides how to satisfy
+    it, and reports honestly if the user declines the UAC prompt.
 #>
 
 function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
@@ -3360,6 +4164,7 @@ function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
     $panelDays     = $dlg.FindName('PanelDays')
     $txtDlgTime    = $dlg.FindName('TxtDlgTime')
     $lblDlgError   = $dlg.FindName('LblDlgError')
+    $chkSignedOut  = $dlg.FindName('ChkWhenSignedOut')
     $btnCreate     = $dlg.FindName('BtnDlgCreate')
     $btnDlgCancel  = $dlg.FindName('BtnDlgCancel')
 
@@ -3410,8 +4215,9 @@ function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
 
         try {
             $script:dialogResult = @{
-                ActionType = $actionType; Recurrence = $recurrence
-                AtTime     = $atTime;     DaysOfWeek = $days
+                ActionType    = $actionType; Recurrence = $recurrence
+                AtTime        = $atTime;     DaysOfWeek = $days
+                WhenSignedOut = [bool]$chkSignedOut.IsChecked
             }
             $dlg.DialogResult = $true; $dlg.Close()
         } catch { $lblDlgError.Text = "Error: $_" }
@@ -3454,8 +4260,68 @@ $ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $mnuCancel = $ctxMenu.Items.Add('Cancel Timer / Disarm')
 $mnuLog    = $ctxMenu.Items.Add('Open Log')
 $ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
+$mnuStartup = $ctxMenu.Items.Add('Start with Windows')
+$ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $mnuExit = $ctxMenu.Items.Add('Exit')
 $trayIcon.ContextMenuStrip = $ctxMenu
+
+# ── Start with Windows ────────────────────────────────────────────────────────
+<#
+    A per-user Run entry. HKCU, so no elevation: consistent with the rest of 2.4,
+    where the app asks for administrator rights only when something genuinely
+    needs them.
+
+    The value is the launcher, not the .ps1, so the entry keeps working the same
+    way a double-click does.
+#>
+$script:RUN_KEY  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$script:RUN_NAME = 'TimedShutdown'
+
+function Get-StartupCommand {
+    return '"{0}"' -f (Join-Path $script:AppRoot 'TimedShutdown.bat')
+}
+
+function Test-StartupEnabled {
+    try {
+        $v = Get-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME -ErrorAction Stop
+        return [bool]$v.$($script:RUN_NAME)
+    } catch { return $false }
+}
+
+<#
+    Writes or removes the Run entry, and reports what the registry ACTUALLY says
+    afterwards rather than what was attempted.
+
+    Set-ItemProperty failing is not hypothetical - policy can lock this key - and
+    a menu tick that lies about whether the app will start at boot is the same
+    class of defect as a cancel that claims to have worked.
+#>
+function Set-StartupEnabled ([bool]$Enabled) {
+    if ($Enabled) {
+        Set-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME `
+                         -Value (Get-StartupCommand) -ErrorAction Stop
+    } else {
+        Remove-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME -ErrorAction SilentlyContinue
+    }
+    return (Test-StartupEnabled)
+}
+
+$mnuStartup.Checked = Test-StartupEnabled
+$mnuStartup.add_Click({
+    $wanted = -not $mnuStartup.Checked
+    try {
+        $actual = Set-StartupEnabled $wanted
+        $mnuStartup.Checked = $actual
+        if ($actual -ne $wanted) {
+            Show-ErrorBox 'Windows did not accept the change to the startup entry.'
+        } else {
+            Write-Log 'settings' 'startup' "enabled=$actual"
+        }
+    } catch {
+        $mnuStartup.Checked = Test-StartupEnabled
+        Show-ErrorBox "Could not change the startup setting:`n`n$($_.Exception.Message)"
+    }
+})
 
 $mnuOpen.add_Click({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })
 $trayIcon.add_DoubleClick({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })

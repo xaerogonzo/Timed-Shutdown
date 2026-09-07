@@ -160,3 +160,78 @@ function Reset-CpuSampler { $script:lastCpuIdle = $null; $script:lastCpuBusy = $
 function Get-IdleSeconds {
     try { return [WinApi]::GetIdleMs() / 1000.0 } catch { return 0.0 }
 }
+
+# ── Process listing ───────────────────────────────────────────────────────────
+
+<#
+    Turns a raw process list into the rows the Triggers tab offers for picking.
+
+    Split from the Get-Process call so it can be tested with fakes, the same way
+    Core/Triggers.ps1 injects GetProcessCount through its context. The rules it
+    encodes are the reason it is worth testing at all:
+
+      * Grouped by NAME, not by PID. That matches the trigger engine, which
+        aggregates by name and treats "exited" as "no instances left" - so the
+        picker must not imply you are choosing one particular window.
+      * Processes owning a visible window sort FIRST. A list led by svchost,
+        dwm and csrss is what made the old free-text box feel like the easier
+        option.
+      * MainWindowTitle is read defensively. Unelevated, some processes deny it,
+        and this app no longer runs elevated.
+#>
+function Get-ProcessChoices ($Processes, [bool]$IncludeBackground = $false) {
+    if (-not $Processes) { return @() }
+
+    $groups = @{}
+    foreach ($p in @($Processes)) {
+        $name = $null
+        try { $name = "$($p.ProcessName)".Trim() } catch { continue }
+        if (-not $name) { continue }
+
+        if (-not $groups.ContainsKey($name)) {
+            $groups[$name] = @{ Name = $name; Count = 0; Title = '' }
+        }
+        $groups[$name].Count++
+
+        if (-not $groups[$name].Title) {
+            # A denial here is normal, not exceptional: it just means this
+            # process contributes no window title to the group.
+            try {
+                $title = "$($p.MainWindowTitle)".Trim()
+                if ($title) { $groups[$name].Title = $title }
+            } catch {}
+        }
+    }
+
+    $rows = foreach ($g in $groups.Values) {
+        [PSCustomObject]@{
+            Name      = $g.Name
+            Count     = $g.Count
+            Title     = $g.Title
+            HasWindow = [bool]$g.Title
+            Display   = Format-ProcessChoice $g.Name $g.Count $g.Title
+        }
+    }
+
+    $rows = @($rows)
+    if (-not $IncludeBackground) { $rows = @($rows | Where-Object { $_.HasWindow }) }
+
+    # Windowed apps first, then alphabetical. Sort-Object is stable, so the two
+    # keys compose rather than fight.
+    return @($rows | Sort-Object -Property @{ Expression = 'HasWindow'; Descending = $true },
+                                           @{ Expression = 'Name';      Descending = $false })
+}
+
+<#
+    One row's label. Long window titles are trimmed rather than allowed to widen
+    the dropdown past the window.
+#>
+function Format-ProcessChoice ([string]$Name, [int]$Count, [string]$Title) {
+    $text = $Name
+    if ($Count -gt 1) { $text += "  ·  $Count running" }
+    if ($Title) {
+        $short = if ($Title.Length -gt 40) { $Title.Substring(0, 39) + '…' } else { $Title }
+        $text += "  ·  $short"
+    }
+    return $text
+}

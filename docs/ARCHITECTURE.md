@@ -1,4 +1,4 @@
-# Architecture
+﻿# Architecture
 
 Timed Shutdown is a PowerShell 5.1 + WPF desktop app. Source is split into
 dot-sourced modules under `src\`; `build.ps1` bundles them into a single
@@ -8,7 +8,7 @@ code — the bundler only inlines the dot-sources and embeds the XAML.
 ## Module map
 
 ```
-src\Main.ps1               entry point: mutex, load order, admin gate, startup
+src\Main.ps1               entry point: mutex, load order, AppRoot, startup
                            recovery, Invoke-PowerAction, the dispatcher tick
 src\Interop.ps1            Add-Type C#: WinApi (P/Invoke) + WindowHotkeyManager
 
@@ -21,7 +21,8 @@ src\Core\Triggers.ps1      the trigger state machine and five evaluators
 src\Core\Power.ps1         keep-awake, legacy repair, the four timed actions
 
 src\UI\Theme.ps1           runtime colour values + ConvertTo-Brush
-src\UI\Xaml.ps1            Import-XamlDocument / New-XamlWindow
+src\UI\Xaml.ps1            Import-XamlDocument / New-XamlWindow + theme merge
+src\UI\Theme.xaml          shared ComboBox / ComboBoxItem / RadioButton templates
 src\UI\MainWindow.xaml     main window markup
 src\UI\MainWindow.ps1      control refs, display helpers, event wiring, settings
 src\UI\ScheduleDialog.*    add-schedule dialog
@@ -292,3 +293,52 @@ Task Scheduler, `powercfg`, `shutdown.exe`, and live WPF rendering are
 side-effecting and verified by hand — use short timers and cancel before they
 fire. `Set-StateFilePath` redirects the store (and the legacy path) into a temp
 directory so a run cannot touch a live install.
+
+## Privilege model (2.4)
+
+The app runs **unelevated**. There is no admin gate, and `TimedShutdown.bat` does
+not request one.
+
+| Operation | Needs elevation? | Why |
+|---|---|---|
+| `shutdown /s`, `/r`, `/h`, `/a` | No | Users hold `SeShutdownPrivilege` on their own machine |
+| `SetSuspendState` (sleep) | No | Ordinary API call |
+| Register a task as the current user | No | Authenticated Users hold Write on `%WINDIR%\System32\Tasks` |
+| `SetThreadExecutionState`, `RegisterHotKey`, `LockWorkStation`, `SC_MONITORPOWER` | No | Per-process / per-session |
+| **Register a task as SYSTEM** | **Yes** | The one exception |
+
+`New-TaskPrincipalFor $WhenSignedOut` is the only place a principal is chosen,
+and `tests\Source.Tests.ps1` fails the build if a SYSTEM principal appears
+anywhere else. Timer-backed `TS_pending_*` tasks always take the current-user
+form; only the Scheduled tab exposes the choice, and it escalates one
+`schtasks.exe` call rather than the app.
+
+The trade is explicit: a current-user task fires while that user is signed in — a
+**locked** session still counts — but not once they sign out.
+
+### Escalation contract
+
+`Register-TaskElevated` and `Remove-TaskElevated` both **verify by reading back**
+rather than trusting an exit code, and treat a declined UAC prompt (1223) as an
+ordinary "no". This is the same rule as `Stop-TimedAction`: never report success
+for something that failed.
+
+### Migration from <= 2.3
+
+Older builds registered every task as SYSTEM. Unelevated, those cannot be
+removed, so `Stop-TimedAction` would fail on precisely the timer the user wants
+cancelled. `Format-TaskRemovalFailure` names that cause, and the Scheduled tab
+grows a **Remove leftover tasks** button (visible only when
+`Get-ElevatedLeftoverTask` finds any).
+
+## Shared window resources
+
+`src\UI\Theme.xaml` is a `ResourceDictionary` of control templates.
+`Import-XamlDocument` splices its children into each window's
+`<Window.Resources>` **before** the window's own entries, so a window can still
+override one by declaring it afterwards. Both the on-disk and bundled paths go
+through that one function, and `build.ps1` globs `src\UI\*.xaml`, so the file is
+embedded with no build change.
+
+Theme.xaml must stay **self-contained**: it is merged first, so a
+`{StaticResource}` pointing at a window's own resource would not resolve.

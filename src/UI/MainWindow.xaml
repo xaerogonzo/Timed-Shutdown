@@ -11,6 +11,16 @@
 
   <Window.Resources>
 
+    <!--
+      Used by the process picker for BOTH the dropdown list and the closed box.
+      DisplayMemberPath styles only the list: the selection box then falls back
+      to the object's ToString and reads "@{Name=; Display=...}". ItemTemplate is
+      mirrored into SelectionBoxItemTemplate, so one template covers both.
+    -->
+    <DataTemplate x:Key="ProcessChoiceTemplate">
+      <TextBlock Text="{Binding Display}" TextTrimming="CharacterEllipsis"/>
+    </DataTemplate>
+
     <Style TargetType="ScrollBar">
       <Setter Property="Background" Value="Transparent"/>
       <Setter Property="Width" Value="8"/>
@@ -492,7 +502,7 @@
           <ComboBox Grid.Row="1" x:Name="CmbTriggerKind" Height="34" Margin="0,0,0,14"
                     Background="#2A2A3E" Foreground="#CDD6F4" BorderBrush="#45475A"
                     VerticalContentAlignment="Center" FontSize="13">
-            <ComboBoxItem Content="A process exits"/>
+            <ComboBoxItem Content="A process exits" IsSelected="True"/>
             <ComboBoxItem Content="Downloads finish"/>
             <ComboBoxItem Content="A signal file appears"/>
             <ComboBoxItem Content="Network / CPU go quiet"/>
@@ -515,22 +525,45 @@
                              VerticalAlignment="Center" IsHitTestVisible="False"/>
                 </Grid>
               </Border>
+              <!--
+                The picker ADDS to the box, it does not replace it. Arming for a
+                process that is not running yet is a supported case (the engine
+                waits for it to start), and a picker alone would remove it.
+              -->
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <ComboBox Grid.Column="0" x:Name="CmbProcPick" Height="30" FontSize="12"
+                          ItemTemplate="{StaticResource ProcessChoiceTemplate}"/>
+                <CheckBox Grid.Column="1" x:Name="ChkProcBackground" Content="background too"
+                          FontSize="11" VerticalAlignment="Center" Margin="10,0,0,0"/>
+              </Grid>
               <StackPanel Orientation="Horizontal">
                 <RadioButton x:Name="RbProcAll" Content="all have exited" IsChecked="True"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
-                <RadioButton x:Name="RbProcAny" Content="any one exits"
-                             Foreground="#BAC2DE" FontSize="12"/>
+                             Margin="0,0,14,0"/>
+                <RadioButton x:Name="RbProcAny" Content="any one exits"/>
               </StackPanel>
             </StackPanel>
 
             <StackPanel x:Name="CfgDownloads" Visibility="Collapsed">
               <TextBlock Text="WATCH FOLDER" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
-              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
-                      BorderThickness="1" Height="34" Margin="0,0,0,8">
-                <TextBox x:Name="TxtDownloadPath" Background="Transparent" BorderThickness="0"
-                         Foreground="#CDD6F4" FontSize="12" Padding="10,0"
-                         VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
-              </Border>
+              <Grid Margin="0,0,0,8">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                        BorderThickness="1" Height="34">
+                  <TextBox x:Name="TxtDownloadPath" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <Button Grid.Column="1" x:Name="BtnBrowseDownload" Content="Browse"
+                        Style="{StaticResource SecondaryBtn}" Padding="12,7"
+                        FontSize="12" Margin="8,0,0,0"/>
+              </Grid>
               <StackPanel Orientation="Horizontal">
                 <TextBlock Text="settle" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
                 <Border Background="#2A2A3E" CornerRadius="4" Width="46" Height="24" Margin="8,0,8,0"
@@ -545,9 +578,28 @@
             </StackPanel>
 
             <StackPanel x:Name="CfgSignal" Visibility="Collapsed">
-              <TextBlock Text="SIGNAL FILE  (deleted when detected)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
-              <Border Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
-                      BorderThickness="1" Height="34" Margin="0,0,0,6">
+              <TextBlock Text="SIGNAL NAME  (deleted when detected)" FontSize="10" Foreground="#6C7086" FontWeight="SemiBold" Margin="0,0,0,6"/>
+              <Grid Margin="0,0,0,6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Border Grid.Column="0" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                        BorderThickness="1" Height="34">
+                  <TextBox x:Name="TxtSignalName" Background="Transparent" BorderThickness="0"
+                           Foreground="#CDD6F4" FontSize="12" Padding="10,0"
+                           VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
+                </Border>
+                <Button Grid.Column="1" x:Name="BtnCopySignalCmd" Content="Copy command"
+                        Style="{StaticResource SecondaryBtn}" Padding="12,7"
+                        FontSize="12" Margin="8,0,0,0"/>
+              </Grid>
+              <TextBlock x:Name="LblSignalResolved" Text="" Foreground="#6C7086"
+                         FontSize="10" TextWrapping="Wrap" Margin="0,0,0,6"/>
+              <CheckBox x:Name="ChkSignalAdvanced" Content="use a full path instead"
+                        FontSize="11" Margin="0,0,0,6"/>
+              <Border x:Name="PanelSignalPath" Background="#2A2A3E" CornerRadius="6" BorderBrush="#45475A"
+                      BorderThickness="1" Height="34" Margin="0,0,0,6" Visibility="Collapsed">
                 <TextBox x:Name="TxtSignalPath" Background="Transparent" BorderThickness="0"
                          Foreground="#CDD6F4" FontSize="12" Padding="10,0"
                          VerticalContentAlignment="Center" CaretBrush="#CDD6F4"/>
@@ -579,10 +631,8 @@
                 <TextBlock Text="%" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
               </StackPanel>
               <StackPanel Orientation="Horizontal">
-                <RadioButton x:Name="RbResAll" Content="all enabled" IsChecked="True"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,12,0"/>
-                <RadioButton x:Name="RbResAny" Content="any enabled"
-                             Foreground="#BAC2DE" FontSize="12" Margin="0,0,14,0"/>
+                <RadioButton x:Name="RbResAll" Content="all enabled" IsChecked="True" Margin="0,0,12,0"/>
+                <RadioButton x:Name="RbResAny" Content="any enabled" Margin="0,0,14,0"/>
                 <TextBlock Text="for" Foreground="#BAC2DE" FontSize="12" VerticalAlignment="Center"/>
                 <Border Background="#2A2A3E" CornerRadius="4" Width="50" Height="24" Margin="6,0,6,0"
                         BorderBrush="#45475A" BorderThickness="1">
@@ -737,7 +787,15 @@
             <Button x:Name="BtnAddSchedule" Content="+ Add"
                     Style="{StaticResource SecondaryBtn}" Padding="16,9" Margin="0,0,8,0"/>
             <Button x:Name="BtnRemoveSchedule" Content="- Remove"
-                    Style="{StaticResource DangerBtn}" Padding="16,9"/>
+                    Style="{StaticResource DangerBtn}" Padding="16,9" Margin="0,0,8,0"/>
+            <!--
+              Only shown when there is something to clean up: tasks left by a
+              pre-2.4 build, which ran as administrator and registered them
+              under SYSTEM. This copy is unelevated and cannot remove them.
+            -->
+            <Button x:Name="BtnCleanupLegacy" Content="Remove leftover tasks"
+                    Style="{StaticResource SecondaryBtn}" Padding="12,9"
+                    FontSize="12" Visibility="Collapsed"/>
           </StackPanel>
         </Grid>
       </TabItem>

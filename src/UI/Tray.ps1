@@ -27,8 +27,68 @@ $ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $mnuCancel = $ctxMenu.Items.Add('Cancel Timer / Disarm')
 $mnuLog    = $ctxMenu.Items.Add('Open Log')
 $ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
+$mnuStartup = $ctxMenu.Items.Add('Start with Windows')
+$ctxMenu.Items.Add([System.Windows.Forms.ToolStripSeparator]::new()) | Out-Null
 $mnuExit = $ctxMenu.Items.Add('Exit')
 $trayIcon.ContextMenuStrip = $ctxMenu
+
+# ── Start with Windows ────────────────────────────────────────────────────────
+<#
+    A per-user Run entry. HKCU, so no elevation: consistent with the rest of 2.4,
+    where the app asks for administrator rights only when something genuinely
+    needs them.
+
+    The value is the launcher, not the .ps1, so the entry keeps working the same
+    way a double-click does.
+#>
+$script:RUN_KEY  = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
+$script:RUN_NAME = 'TimedShutdown'
+
+function Get-StartupCommand {
+    return '"{0}"' -f (Join-Path $script:AppRoot 'TimedShutdown.bat')
+}
+
+function Test-StartupEnabled {
+    try {
+        $v = Get-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME -ErrorAction Stop
+        return [bool]$v.$($script:RUN_NAME)
+    } catch { return $false }
+}
+
+<#
+    Writes or removes the Run entry, and reports what the registry ACTUALLY says
+    afterwards rather than what was attempted.
+
+    Set-ItemProperty failing is not hypothetical - policy can lock this key - and
+    a menu tick that lies about whether the app will start at boot is the same
+    class of defect as a cancel that claims to have worked.
+#>
+function Set-StartupEnabled ([bool]$Enabled) {
+    if ($Enabled) {
+        Set-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME `
+                         -Value (Get-StartupCommand) -ErrorAction Stop
+    } else {
+        Remove-ItemProperty -Path $script:RUN_KEY -Name $script:RUN_NAME -ErrorAction SilentlyContinue
+    }
+    return (Test-StartupEnabled)
+}
+
+$mnuStartup.Checked = Test-StartupEnabled
+$mnuStartup.add_Click({
+    $wanted = -not $mnuStartup.Checked
+    try {
+        $actual = Set-StartupEnabled $wanted
+        $mnuStartup.Checked = $actual
+        if ($actual -ne $wanted) {
+            Show-ErrorBox 'Windows did not accept the change to the startup entry.'
+        } else {
+            Write-Log 'settings' 'startup' "enabled=$actual"
+        }
+    } catch {
+        $mnuStartup.Checked = Test-StartupEnabled
+        Show-ErrorBox "Could not change the startup setting:`n`n$($_.Exception.Message)"
+    }
+})
 
 $mnuOpen.add_Click({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })
 $trayIcon.add_DoubleClick({ $window.Show(); $window.WindowState = 'Normal'; $window.Activate() })

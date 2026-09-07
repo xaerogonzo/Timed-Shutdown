@@ -568,3 +568,90 @@ Describe 'Repair-LegacyPowerSuppression' {
         ($script:powercfgCalls -join ' | ') | Should -Match 'standby-timeout-ac 1'
     }
 }
+
+<#
+    A failed cancel is the one message in this app the user acts on by walking
+    away from the machine, so it has to say something they can act on.
+
+    After 2.4 the likeliest cause is an upgrade: tasks registered by an older,
+    elevated build cannot be removed by this unelevated one, and the raw CIM
+    text ("Access is denied") gives no clue what to do.
+#>
+Describe 'Format-TaskRemovalFailure' {
+
+    It 'explains the pre-2.4 upgrade case for <_>' -ForEach @(
+        'Access is denied.',
+        'Exception calling method: 0x80070005',
+        'UnauthorizedAccessException'
+    ) {
+        $msg = Format-TaskRemovalFailure 'TS_pending_sleep' $_
+        $msg | Should -Match 'older version'
+        $msg | Should -Match 'Remove leftover tasks'
+        $msg | Should -Match 'TS_pending_sleep'
+    }
+
+    It 'passes an unrelated failure through unchanged' {
+        $msg = Format-TaskRemovalFailure 'TS_pending_sleep' 'The RPC server is unavailable.'
+        $msg | Should -Match 'RPC server is unavailable'
+        $msg | Should -Not -Match 'older version'
+    }
+
+    <#
+        Stop-TimedAction must keep NOT clearing state when a removal failed.
+        pendingAction mirrors something still running outside this process;
+        dropping the mirror would leave the user unable to see or retry it.
+    #>
+    It 'leaves the pending action intact when removal is denied' {
+        Write-PendingAction 'sleep' 600 'scheduled-task' (Get-Date).AddMinutes(10)
+        Set-PowerCommandSeam -RemovePendingTask { param($Name, $TaskPath) throw 'Access is denied.' }
+
+        { Stop-TimedAction } | Should -Throw
+        (Read-State).pendingAction.type | Should -Be 'sleep'
+
+        Reset-PowerCommandSeam
+    }
+}
+
+<#
+    The README states that "every arm, fire, cancel, and abort is recorded with a
+    reason". Only the FAILURE path used to write a line, so the one question you
+    actually ask the log - "was my timer really called off?" - had no answer in
+    it. A promise in the docs that the code does not keep is a defect.
+#>
+Describe 'Stop-TimedAction logging' {
+
+    BeforeEach {
+        $sandbox = New-Sandbox
+        Set-StateFilePath (Join-Path $sandbox 'state.json')
+        Set-LogFilePath   (Join-Path $sandbox 'log.txt')
+        Reset-Fakes
+    }
+    AfterEach {
+        Reset-PowerCommandSeam
+        Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    It 'records a successful cancel, naming what was pending' {
+        Write-PendingAction 'shutdown' 600 'os-timer' (Get-Date).AddMinutes(10)
+        Set-PowerCommandSeam -ShutdownExe { param($Arguments) @{ ExitCode = 0; Output = '' } } `
+                             -RemovePendingTask { param($Name, $TaskPath) $false }
+
+        Stop-TimedAction
+
+        $log = Get-Content (Join-Path $sandbox 'log.txt') -Raw
+        $log | Should -Match 'cancelled'
+        $log | Should -Match 'was=shutdown'
+    }
+
+    It 'still records the failure path distinctly' {
+        Write-PendingAction 'sleep' 600 'scheduled-task' (Get-Date).AddMinutes(10)
+        Set-PowerCommandSeam -RemovePendingTask { param($Name, $TaskPath) throw 'Access is denied.' }
+
+        { Stop-TimedAction } | Should -Throw
+
+        $log = Get-Content (Join-Path $sandbox 'log.txt') -Raw
+        $log | Should -Match 'cancel-failed'
+        # A failed cancel must never also claim to have succeeded.
+        $log | Should -Not -Match 'cancelled'
+    }
+}

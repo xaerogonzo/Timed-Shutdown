@@ -1,4 +1,4 @@
-# Timed Shutdown — Basic Instructions
+﻿# Timed Shutdown — Basic Instructions
 
 ---
 
@@ -220,3 +220,83 @@ the app never *initiates* an action from it.
 **Window.Title must stay exactly `Timed Shutdown`.** The single-instance guard
 finds the existing window by that title. The version belongs in the header
 TextBlock, the tray tooltip and the log — never in the title.
+
+**Setting a property is not styling a WPF control.** A `ControlTemplate` decides
+whether your `Background` is honoured at all. Stock Aero's `ComboBox` template
+ignores it and paints the dropdown popup with `SystemColors.WindowBrush` -- so a
+dark-themed app got a white menu with pale text, and no amount of colour setters
+could fix it. Every other control in this app is retemplated; ComboBox was the
+one left behind. Shared templates live in `src\UI\Theme.xaml` and are spliced
+into each window by `Import-XamlDocument`. Test the *template*, not the colour:
+an assertion on `Background` passes against the broken version.
+
+**XML comments may not contain `--`.** Not a style preference: `<!-- a -- b -->`
+is malformed XML and `XamlReader.Load` rejects the whole document. Prose dashes
+in XAML comments have to be single hyphens or punctuation.
+
+**`DisplayMemberPath` does not style a ComboBox's closed box.** It renders the
+dropdown items and leaves the selection box showing the object's `ToString` --
+`@{Name=; Display=...}`. Use an explicit `ItemTemplate`, which WPF mirrors into
+`SelectionBoxItemTemplate`, so one template covers both.
+
+**Elevation is a per-operation decision, not a per-app one.** Up to 2.3 the whole
+app demanded UAC, and the only cause was `New-ScheduledTaskPrincipal -UserId
+'SYSTEM'`. Authenticated Users hold Write on `%WINDIR%\System32\Tasks`, and Users
+hold `SeShutdownPrivilege` -- so registering tasks as the current user, and
+shutdown/restart/sleep/hibernate, all work unelevated. Verify a privilege claim
+before designing around it: `shutdown.exe /a` returns 1116 (nothing to abort),
+not 5 (access denied). `Source.Tests.ps1` now fails the build if a SYSTEM
+principal appears anywhere but `New-TaskPrincipalFor`.
+
+**Dropping elevation is a migration, not just a change.** Tasks registered by the
+old elevated build cannot be removed by the new unelevated one, so Cancel breaks
+on exactly the timer the user wants stopped. Detect it and say so in words the
+user can act on -- `Format-TaskRemovalFailure` -- rather than surfacing "Access is
+denied".
+
+**A test that lifts a function out of a source file must lift everything it
+calls.** `Ui.Tests.ps1` extracts validation functions by regex. When
+`Get-TriggerConfigFromUi` grew a call to `Test-SignalName`, the "refuses X" cases
+kept passing -- on a null-reference from a control the harness had not created,
+not on the refusal being tested. Same family as the `$Input` trap: a refusal test
+that passes for the wrong reason is invisible. Also note the extraction pattern
+must allow an optional parameter list, or it silently matches nothing.
+
+**Prove a new test can fail.** Every regression test added in 2.4 was checked by
+reverting the fix and confirming the failure -- the ComboBox theme (4 tests) and
+the SYSTEM-principal ban (2 tests). A test written against already-fixed code is
+an assumption until you have seen it go red.
+
+**Enumerate processes on demand, never on the tick.** `Get-Process` over ~250
+processes costs 50-150 ms. The picker refills on `DropDownOpened`, which also
+means it is never stale.
+**Do not hand-quote arguments in `-ArgumentList`.** PowerShell already quotes an
+argument containing spaces. Adding `` `" `` around a value passes the quote
+characters through as part of it, and `schtasks /TN "\TimedShutdown\x"` was
+rejected with "The filename, directory name, or volume label syntax is
+incorrect". Quote only when the string is parsed by `cmd.exe`, which does its own
+splitting.
+
+**`schtasks /SD` wants literal `mm/dd/yyyy`, not the machine short-date format.**
+This is the exception to the locale rule elsewhere in this file: `ToString('d')`
+produced "Invalid Start Date". Use `InvariantCulture` with an explicit
+`MM/dd/yyyy`. The general lesson is the same either way -- check what the
+external tool actually accepts instead of reasoning about it.
+
+**`New-ScheduledTask` returns a CimInstance with no `XmlText`.** The natural-looking
+"build a task, hand the XML to an elevated schtasks" design cannot work, and
+nothing about the code reads as wrong. `schtasks` native flags (`/SC`, `/ST`,
+`/SD`, `/D`, `/RU SYSTEM`, `/RL HIGHEST`) express the same intent with no XML at
+all. Verify a .NET or cmdlet property exists before designing around it -- the
+same failure shape as `[Environment]::TickCount64`.
+**A test that reads a real user path tests your machine, not the code.** Arming a
+named signal was refused with "Folder does not exist" on any machine that had
+never run the app -- i.e. every fresh install -- because the signals folder is
+created by the signal *tool*, and the whole point is to arm before the job that
+signals it. Locally the folder already existed, so four tests passed; a clean CI
+runner failed all four. Any path a test resolves needs a seam (`Set-SignalDir`,
+`Set-StateFilePath`, `Set-LogFilePath`) pointed at a disposable directory, and
+the "fresh install" case has to be reproduced by deleting it, not assumed.
+
+The app creates folders it owns; it does not create a directory the user typed.
+Those are different decisions and the tests assert both.

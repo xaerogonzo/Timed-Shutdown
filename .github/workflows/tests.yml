@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # shell: powershell is Windows PowerShell 5.1 - the runtime the app targets,
       # and STA by default, which the WPF markup tests require. Do not switch to

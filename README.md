@@ -1,4 +1,4 @@
-# Timed Shutdown
+﻿# Timed Shutdown
 
 [![tests](https://github.com/xaerogonzo/Timed-Shutdown/actions/workflows/tests.yml/badge.svg)](https://github.com/xaerogonzo/Timed-Shutdown/actions/workflows/tests.yml)
 
@@ -10,13 +10,16 @@ A dark-themed WPF utility for Windows that makes timed shutdowns, restarts, slee
 
 - Windows 10 / 11
 - PowerShell 5.1 (included with Windows)
-- Administrator privileges (required for Task Scheduler entries)
+
+**No administrator rights.** Everything the app does runs on a standard user
+token. The single exception is opt-in: ticking *Run even when I am signed out* on
+a schedule asks for approval once, at the moment you press Create.
 
 ---
 
 ## Installation
 
-No installer needed. Keep the project folder together and double-click **`TimedShutdown.bat`**. It auto-elevates via UAC.
+No installer needed. Keep the project folder together and double-click **`TimedShutdown.bat`**. No UAC prompt.
 
 ```
 TimedShutdown.bat      <- launch this
@@ -87,7 +90,7 @@ wait for, pick the action, press **Arm Trigger**.
 
 | Wait for | Fires when |
 |---|---|
-| **A process exits** | Named processes have exited — `ffmpeg`, `HandBrake`, a game, a backup tool. Choose *all have exited* or *any one exits*. |
+| **A process exits** | Named processes have exited — `ffmpeg`, `HandBrake`, a game, a backup tool. Choose *all have exited* or *any one exits*. Use the **Pick a running process** dropdown, or type a name for something not started yet. |
 | **Downloads finish** | A watched folder has no partial-download files left and nothing has changed for N seconds. |
 | **A signal file appears** | A file shows up at a chosen path. The universal hook — see below. |
 | **Network / CPU go quiet** | Network below X KB/s and/or CPU below Y %, held for N seconds. |
@@ -113,33 +116,46 @@ trigger that is running is always the one you configured.
 
 #### Signal files: triggering from anything
 
-`tools\TimedShutdown-signal.cmd` writes a flag file that an armed **signal**
-trigger picks up:
+Pick a **signal name** (default `done`) and the trigger watches
+`%LOCALAPPDATA%\TimedShutdown\signals\<name>.flag`. Anything that can run a
+command can now trigger a shutdown. The **Copy command** button puts the exact
+line on your clipboard:
 
 ```bash
 tools\TimedShutdown-signal.cmd done
 ```
 
-That writes `%LOCALAPPDATA%\TimedShutdown\signals\done.flag`. Any tool that can
-run a command can now trigger a shutdown — build scripts, backup jobs, render
-queues, scheduled tasks.
-
 > Write the file and **leave it**: the app deletes it when it consumes it. A flag
-> that the producer creates and removes itself between two one-second polls is
-> never seen. And point the trigger at a path you do not mind being deleted.
+> the producer creates and removes itself between two one-second polls is never
+> seen.
 
-**Claude Code:** add a `Stop` hook to `.claude/settings.json`. If you already have
-`Stop` hooks, append to the array rather than replacing it — a copy-paste that
-overwrites will silently disable whatever was there:
+**Claude Code.** "Shut down when the job is finished" depends on what you mean by
+finished, and the difference matters — this is a trigger that turns your machine
+off.
+
+| Recipe | Fires | Use when |
+|---|---|---|
+| Chain it to the command | Exactly once, when that command exits | You know the job you are waiting for |
+| `SessionEnd` hook | Once, when the session ends | "I am done for the night" |
+| `Stop` hook | **After every reply** | You arm it and then stop typing |
+
+**1. Chain it to the command** — the one to reach for. No hook config, no
+surprises, and it fires exactly once:
+
+```bash
+claude -p "refactor the parser and run the tests" && tools\TimedShutdown-signal.cmd done
+```
+
+**2. `SessionEnd` hook** — fires once, when you exit Claude Code:
 
 ```json
 {
   "hooks": {
-    "Stop": [
+    "SessionEnd": [
       {
         "matcher": "",
         "hooks": [
-          { "type": "command", "command": "C:\\path\\to\\tools\\TimedShutdown-signal.cmd done" }
+          { "type": "command", "command": "C:\path\to\tools\TimedShutdown-signal.cmd done" }
         ]
       }
     ]
@@ -147,8 +163,29 @@ overwrites will silently disable whatever was there:
 }
 ```
 
-Arm a **signal file appears** trigger with the action you want, and the machine
-shuts down when Claude finishes.
+**3. `Stop` hook** — be careful with this one. `Stop` fires **once per turn**, not
+once per job: arm a shutdown, send Claude one more message, and the machine
+powers off 60 seconds after its next reply. It is only right if you arm the
+trigger and then stop typing. Same JSON as above with `SessionEnd` replaced by
+`Stop`.
+
+> If you already have hooks for that event, **append** to the array rather than
+> replacing it — a copy-paste that overwrites will silently disable whatever was
+> there.
+
+**Anything else.** The pattern is the same for any tool that can run a command
+when it finishes:
+
+```bash
+robocopy D:\src E:\backup /MIR && tools\TimedShutdown-signal.cmd done
+```
+
+```powershell
+.\build.ps1 ; if ($?) { .\tools\TimedShutdown-signal.cmd done }
+```
+
+In every case the trigger still applies the 15-second arm delay and the abortable
+60-second countdown, so an unexpected signal is recoverable.
 
 ---
 
@@ -158,6 +195,13 @@ Recurring or one-time actions via Windows Task Scheduler, stored in the `\TimedS
 
 - **+ Add** — action, recurrence (Once / Daily / Weekly with a day picker), and a 24-hour time
 - **- Remove** — deletes the selected task
+- **Run even when I am signed out** — a schedule normally runs as you, which
+  covers a locked screen but not a signed-out one. Tick this and the task is
+  registered to run as SYSTEM instead, which fires regardless. It is the only
+  thing in the app that needs administrator approval, and it asks once, at the
+  moment you press Create.
+- **Remove leftover tasks** — appears only if a pre-2.4 version left behind tasks
+  that ran as administrator; this build cannot remove them without approval
 - A `once` schedule for a time that has already passed today is created for **tomorrow**, so it still fires
 
 ---
@@ -168,7 +212,12 @@ The app lives in the tray when minimized or when the window is closed with X.
 
 - **Double-click** to restore
 - Tooltip shows the active countdown or trigger state
-- Right-click for **Open**, **Cancel Timer / Disarm**, **Open Log**, **Exit**
+- Right-click for **Open**, **Cancel Timer / Disarm**, **Open Log**, **Start with
+  Windows**, **Exit**
+
+**Start with Windows** writes a per-user entry under
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. No administrator rights,
+and nothing outside your own account is touched.
 
 Closing with X minimizes to tray; use the tray menu's Exit to actually quit.
 
@@ -271,8 +320,14 @@ powershell -NoProfile -Command "Get-Module -ListAvailable Pester | Select-Object
 
 ## Troubleshooting
 
-**"Administrator privileges are required"**
-Launch via `TimedShutdown.bat` rather than running the `.ps1` directly.
+**A scheduled action did not fire while I was signed out**
+A schedule runs as you unless you tick **Run even when I am signed out** when
+creating it. Remove it and add it again with the box ticked.
+
+**"created by an older version ... cannot remove it"**
+Versions up to 2.3 ran as administrator and registered their tasks as SYSTEM.
+This build does not elevate, so it cannot delete them. Open the **Scheduled** tab
+and use **Remove leftover tasks**, which asks for approval once.
 
 **Win+Alt+M doesn't work**
 Another application already registered that combination. The app skips hotkey registration silently; nothing else is affected.

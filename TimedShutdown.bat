@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 setlocal
 
 :: Prefer the bundled single-file build; fall back to running from src\ directly
@@ -14,12 +14,11 @@ if not exist "%PS1%" (
     exit /b 1
 )
 
-:: Check for administrator privileges (fltMC is instant and spawns no window)
-fltMC >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    powershell -NoProfile -Command "Start-Process cmd -ArgumentList '/c \"\"%~f0\" %*\"' -Verb RunAs"
-    exit /b
-)
+:: No elevation. Every action the app performs -- shutdown, restart, sleep,
+:: hibernate, the tray hotkey, and registering its own scheduled tasks -- works
+:: on a standard user token. The only thing that needs administrator rights is
+:: the opt-in "run even when I'm signed out" schedule, which asks for approval
+:: at the moment it is used rather than for the whole session.
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass -STA -WindowStyle Hidden -File "%PS1%" %*
 endlocal

@@ -4,6 +4,10 @@
 
     Returns a hashtable of the chosen settings, or $null when cancelled. Creating
     the task is the caller's job (Add-ScheduledAction in Core/Scheduler.ps1).
+
+    WhenSignedOut asks for a SYSTEM principal, which requires elevation. This
+    dialog only records the choice; Add-ScheduledAction decides how to satisfy
+    it, and reports honestly if the user declines the UAC prompt.
 #>
 
 function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
@@ -15,6 +19,7 @@ function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
     $panelDays     = $dlg.FindName('PanelDays')
     $txtDlgTime    = $dlg.FindName('TxtDlgTime')
     $lblDlgError   = $dlg.FindName('LblDlgError')
+    $chkSignedOut  = $dlg.FindName('ChkWhenSignedOut')
     $btnCreate     = $dlg.FindName('BtnDlgCreate')
     $btnDlgCancel  = $dlg.FindName('BtnDlgCancel')
 
@@ -65,8 +70,9 @@ function Show-AddScheduleDialog ([System.Windows.Window]$Owner) {
 
         try {
             $script:dialogResult = @{
-                ActionType = $actionType; Recurrence = $recurrence
-                AtTime     = $atTime;     DaysOfWeek = $days
+                ActionType    = $actionType; Recurrence = $recurrence
+                AtTime        = $atTime;     DaysOfWeek = $days
+                WhenSignedOut = [bool]$chkSignedOut.IsChecked
             }
             $dlg.DialogResult = $true; $dlg.Close()
         } catch { $lblDlgError.Text = "Error: $_" }

@@ -220,22 +220,42 @@ Describe 'Trigger configuration validation' {
         $script:vWin = [Windows.Markup.XamlReader]::Load((New-Object System.Xml.XmlNodeReader $doc))
 
         foreach ($n in 'CmbTriggerKind','TxtProcNames','RbProcAll','RbProcAny','TxtDownloadPath',
-                       'TxtSettleSec','ChkRecurse','TxtSignalPath','ChkResNet','TxtResKbps',
+                       'TxtSettleSec','ChkRecurse','TxtSignalName','ChkSignalAdvanced','TxtSignalPath',
+                       'ChkResNet','TxtResKbps',
                        'ChkResCpu','TxtResCpu','RbResAll','RbResAny','TxtResSustain','TxtIdleTime') {
             Set-Variable -Name $n -Value $script:vWin.FindName($n) -Scope Script
         }
         $script:triggerKinds = @('process','downloads','signal','resource','idle')
+
+        # Signal paths resolve into a disposable folder: these tests must never
+        # create or delete anything under a live install's %LOCALAPPDATA%.
+        $script:signalSandbox = Join-Path $env:TEMP "TS_signals_$([guid]::NewGuid().ToString('N'))"
 
         . (Join-Path $script:srcDir 'Core\Time.ps1')
 
         # Lift the two functions under test out of MainWindow.ps1 rather than
         # sourcing the whole file, which would build a second window.
         $uiSrc = Get-Content (Join-Path $script:uiDir 'MainWindow.ps1') -Raw -Encoding UTF8
-        foreach ($fn in 'Get-SelectedTriggerKind','Get-TriggerConfigFromUi') {
-            $m = [regex]::Match($uiSrc, "(?ms)^function $fn \{.*?^\}")
+        # Every function the validation path reaches. Omitting one does not make
+        # a "refuses X" test fail -- it makes it pass for the wrong reason, on a
+        # null-reference rather than the refusal being tested.
+        foreach ($fn in 'Set-SignalDir','Get-SignalDir','Initialize-SignalDir','Get-SignalPath',
+                        'Test-SignalName','Get-ConfiguredSignalPath','Get-SelectedTriggerKind',
+                        'Get-TriggerConfigFromUi') {
+            # The parameter list is optional: Get-SelectedTriggerKind has none,
+            # Get-SignalPath ([string]$Name) does. A pattern that assumed one
+            # shape silently failed to extract the other.
+            $m = [regex]::Match($uiSrc, "(?ms)^function $fn\s*(\([^)]*\))?\s*\{.*?^\}")
             if (-not $m.Success) { throw "could not extract $fn from MainWindow.ps1" }
             . ([scriptblock]::Create($m.Value))
         }
+
+        # Must come AFTER the lift: Set-SignalDir is one of the functions above.
+        Set-SignalDir $script:signalSandbox
+    }
+
+    AfterAll {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
     }
 
     It 'refuses <Case>' -TestCases @(
@@ -245,8 +265,11 @@ Describe 'Trigger configuration validation' {
         @{ Case = 'downloads with a missing folder';   Kind = 1; Setup = { $TxtDownloadPath.Text = 'X:
 ope' } }
         @{ Case = 'downloads with a bad settle time';  Kind = 1; Setup = { $TxtDownloadPath.Text = $env:TEMP; $TxtSettleSec.Text = 'soon' } }
-        @{ Case = 'a signal with no path';             Kind = 2; Setup = { $TxtSignalPath.Text = '' } }
-        @{ Case = 'a signal in a missing folder';      Kind = 2; Setup = { $TxtSignalPath.Text = 'X:
+        @{ Case = 'a signal with no path';             Kind = 2; Setup = { $ChkSignalAdvanced.IsChecked = $true; $TxtSignalPath.Text = '' } }
+        @{ Case = 'a signal name that is empty';       Kind = 2; Setup = { $ChkSignalAdvanced.IsChecked = $false; $TxtSignalName.Text = '' } }
+        @{ Case = 'a signal name with a path separator'; Kind = 2; Setup = { $ChkSignalAdvanced.IsChecked = $false; $TxtSignalName.Text = 'sub\done' } }
+        @{ Case = 'a signal name with a space';        Kind = 2; Setup = { $ChkSignalAdvanced.IsChecked = $false; $TxtSignalName.Text = 'all done' } }
+        @{ Case = 'a signal in a missing folder';      Kind = 2; Setup = { $ChkSignalAdvanced.IsChecked = $true; $TxtSignalPath.Text = 'X:
 ope\go.flag' } }
         @{ Case = 'resource with no metric enabled';   Kind = 3; Setup = { $ChkResNet.IsChecked = $false; $ChkResCpu.IsChecked = $false } }
         @{ Case = 'resource with a bad threshold';     Kind = 3; Setup = { $ChkResNet.IsChecked = $true; $TxtResKbps.Text = 'lots' } }
@@ -286,8 +309,169 @@ ope\go.flag' } }
         Set-Content $existing 'x' -Encoding ascii
         try {
             $CmbTriggerKind.SelectedIndex = 2
+            $ChkSignalAdvanced.IsChecked = $true
             $TxtSignalPath.Text = $existing
             { Get-TriggerConfigFromUi } | Should -Throw
         } finally { Remove-Item $existing -Force -ErrorAction SilentlyContinue }
+    }
+
+    <#
+        A named signal must resolve to the same folder
+        tools\TimedShutdown-signal.cmd writes to. The name is the whole contract
+        between the two halves; if they ever disagree the trigger waits forever
+        on a file nothing creates.
+
+        Asserted against the DEFAULT location and as pure strings, so it stays a
+        statement about the contract and touches no filesystem.
+    #>
+    It 'defaults to the folder the signal tool writes to' {
+        Set-SignalDir $null
+        try {
+            Get-SignalPath 'done' |
+                Should -Be (Join-Path (Join-Path $env:LOCALAPPDATA 'TimedShutdown') 'signals\done.flag')
+            $tool = Get-Content (Join-Path $PSScriptRoot '..\tools\TimedShutdown-signal.cmd') -Raw
+            $tool | Should -Match ([regex]::Escape('TimedShutdown\signals'))
+        } finally { Set-SignalDir $script:signalSandbox }
+    }
+
+    <#
+        Regression, caught by CI on a clean runner and not locally.
+
+        Arming a named signal used to be REFUSED with "Folder does not exist"
+        whenever the signals folder had not been created yet - which on a fresh
+        install is always, because the folder appears when the signal TOOL first
+        runs and the entire point is to arm before the job that signals it. It
+        passed in development only because that machine had run the app before.
+
+        The sandbox below is what makes this test mean anything: pointed at a
+        directory that is deleted between cases, it reproduces "fresh install"
+        every time.
+    #>
+    It 'creates the signal folder rather than refusing when it does not exist' {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        Test-Path $script:signalSandbox | Should -BeFalse
+
+        $CmbTriggerKind.SelectedIndex = 2
+        $ChkSignalAdvanced.IsChecked  = $false
+        $TxtSignalName.Text           = 'done'
+
+        $cfg = Get-TriggerConfigFromUi
+        $cfg.Path | Should -Be (Join-Path $script:signalSandbox 'done.flag')
+        Test-Path $script:signalSandbox | Should -BeTrue
+    }
+
+    It 'accepts a signal name of <_> on a machine that has never run the app' -ForEach @('done', 'build_2', 'a.b-c') {
+        Remove-Item $script:signalSandbox -Recurse -Force -ErrorAction SilentlyContinue
+        $CmbTriggerKind.SelectedIndex = 2
+        $ChkSignalAdvanced.IsChecked  = $false
+        $TxtSignalName.Text           = $_
+        { Get-TriggerConfigFromUi } | Should -Not -Throw
+    }
+
+    <#
+        A full path the USER typed is still checked and never created: the app
+        owns its own signals folder, not an arbitrary directory.
+    #>
+    It 'still refuses a user-supplied full path in a folder that does not exist' {
+        $CmbTriggerKind.SelectedIndex = 2
+        $ChkSignalAdvanced.IsChecked  = $true
+        $TxtSignalPath.Text = Join-Path $env:TEMP "TS_nope_$([guid]::NewGuid().ToString('N'))\go.flag"
+        { Get-TriggerConfigFromUi } | Should -Throw
+    }
+}
+
+<#
+    The v2.4 readability defect, pinned.
+
+    ComboBox was the only control in the app still on the stock Aero template.
+    Aero IGNORES the Background set on a ComboBox and paints its dropdown popup
+    with SystemColors.WindowBrush - white - so the pale #CDD6F4 foreground sat on
+    white and the menu was unreadable. Setting properties cannot fix that.
+
+    These tests therefore assert the TEMPLATE, not the Background. A future
+    change that drops the template while keeping the colour setters would
+    reintroduce the exact bug and still satisfy any colour-only assertion.
+
+    They also load markup through the real Import-XamlDocument path rather than
+    parsing the file, because the shared theme is merged in there. A test that
+    read the raw .xaml would be checking markup the app never actually loads.
+#>
+Describe 'Shared control theme' {
+
+    BeforeAll {
+        . (Join-Path $script:uiDir 'Xaml.ps1')
+        Set-XamlRoot $script:uiDir
+    }
+
+    It 'merges the shared theme into <_>' -ForEach @('MainWindow.xaml', 'ScheduleDialog.xaml') {
+        $w = New-XamlWindow $_
+        foreach ($type in @([System.Windows.Controls.ComboBox],
+                            [System.Windows.Controls.ComboBoxItem],
+                            [System.Windows.Controls.RadioButton])) {
+            $style = $w.TryFindResource($type)
+            $style | Should -Not -BeNullOrEmpty -Because "$($type.Name) needs a style in $_"
+            @($style.Setters | Where-Object { $_.Property.Name -eq 'Template' }).Count |
+                Should -Be 1 -Because "$($type.Name) needs a real template, not colour setters"
+        }
+    }
+
+    It 'keeps PART_Popup, which ComboBox looks up to find its dropdown' {
+        $w        = New-XamlWindow 'MainWindow.xaml'
+        $style    = $w.TryFindResource([System.Windows.Controls.ComboBox])
+        $template = ($style.Setters | Where-Object { $_.Property.Name -eq 'Template' }).Value
+        $root     = $template.LoadContent()
+
+        $popup = $root.FindName('PART_Popup')
+        if (-not $popup) {
+            # LoadContent does not always register names; fall back to a walk.
+            $popup = @($root.Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.Popup] })[0]
+        }
+        $popup | Should -Not -BeNullOrEmpty
+    }
+
+    <#
+        The specific fix: the popup paints its OWN background. Inheriting is
+        what produced white.
+    #>
+    It 'gives the dropdown popup an explicit dark background' {
+        $w        = New-XamlWindow 'MainWindow.xaml'
+        $style    = $w.TryFindResource([System.Windows.Controls.ComboBox])
+        $template = ($style.Setters | Where-Object { $_.Property.Name -eq 'Template' }).Value
+        $root     = $template.LoadContent()
+
+        $popup = @($root.Children | Where-Object { $_ -is [System.Windows.Controls.Primitives.Popup] })[0]
+        $popup | Should -Not -BeNullOrEmpty
+
+        $border = $popup.Child
+        $border          | Should -BeOfType [System.Windows.Controls.Border]
+        $border.Background | Should -Not -BeNullOrEmpty
+
+        # Dark, not the system window brush that caused the bug.
+        $c = $border.Background.Color
+        ([int]$c.R + [int]$c.G + [int]$c.B) | Should -BeLessThan 300
+    }
+
+    <#
+        Shared entries are spliced in FIRST so a window can still override one by
+        declaring its own afterwards. If that order ever inverts, per-window
+        customisation silently stops working.
+    #>
+    It 'puts shared entries before the window own resources' {
+        $doc = Import-XamlDocument 'MainWindow.xaml'
+        $nsm = New-Object System.Xml.XmlNamespaceManager($doc.NameTable)
+        $nsm.AddNamespace('d', 'http://schemas.microsoft.com/winfx/2006/xaml/presentation')
+        $nsm.AddNamespace('x', 'http://schemas.microsoft.com/winfx/2006/xaml')
+
+        $res   = $doc.SelectSingleNode('/d:Window/d:Window.Resources', $nsm)
+        $names = @($res.ChildNodes | Where-Object { $_.NodeType -eq 'Element' } |
+                   ForEach-Object { $_.GetAttribute('TargetType') })
+
+        # ComboBox comes from Theme.xaml; ScrollBar is MainWindow first entry.
+        $names.IndexOf('ComboBox') | Should -BeLessThan $names.IndexOf('ScrollBar')
+    }
+
+    It 'does not merge the theme into itself' {
+        # Guards against the recursion that a missing self-check would cause.
+        { Import-XamlDocument 'Theme.xaml' } | Should -Not -Throw
     }
 }
