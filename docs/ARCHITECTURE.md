@@ -283,6 +283,41 @@ evaluation, and tray tooltip. It must stay cheap:
 - Task enumeration happens on demand: startup, Scheduled-tab activation, and
   after add/remove.
 
+
+### Nothing on the UI thread may block
+
+The tick is not the only thing that has to stay cheap — *nothing* reached from
+the dispatcher may block it, and a blocking call that also waits on other
+processes may not be made at all.
+
+v2.4's `Invoke-MonitorOff` broke both halves. It slept 300 ms on the UI thread
+and then broadcast `WM_SYSCOMMAND` with `SendMessage(HWND_BROADCAST, ...)`,
+which waits on every top-level window in the session with no timeout. One app
+elsewhere on the machine not pumping its queue was enough to leave Timed
+Shutdown permanently at "(Not Responding)". Two rules came out of it:
+
+- **Defer, do not block.** Anything with a waiting period becomes a one-shot
+  `DispatcherTimer` that returns immediately. `Invoke-MonitorOff` /
+  `Step-MonitorOff` / `Get-MonitorOffDecision` in `Core\Power.ps1` are the
+  worked example: state machine in plain functions, timer as plumbing. Splitting
+  it that way is also what makes it testable, since Pester runs no message pump
+  and drives `Step-MonitorOff` by hand.
+- **A WndProc must never call anything that can block.** Sharper than the first
+  rule, and the reason `Win+Alt+M` was the worse of the two entry points — it
+  ran all of the above from inside `WindowHotkeyManager.WndProc`.
+
+When a broadcast is genuinely needed, use `SendMessageTimeout` with
+`SMTO_ABORTIFHUNG`. Note what that does and does not buy: the timeout applies to
+each *recipient* individually, so several hung windows still add up. It is not a
+wall-clock cap on the call. The guarantee is that no single window can block us
+indefinitely — an unbounded wait becomes a finite one.
+
+`Source.Tests.ps1` enforces both rules statically, by parsing rather than
+grepping. The `Start-Sleep` ban is project policy rather than a universal
+PowerShell rule: every path in `src\` runs on the dispatcher, since this app has
+no background thread anywhere. If that ever stops being true, narrow the rule to
+the UI entry points — do not delete it.
+
 ## Testing
 
 `tests\` covers the pure logic with Pester 5+. Trigger evaluators take an

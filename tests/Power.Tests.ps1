@@ -148,11 +148,33 @@ Describe 'Write-PendingAction' {
             Should -BeLessThan 1
     }
 
-    # Stored as UTC round-trip format so a timezone change between write and read
-    # cannot move the target.
+    <#
+        Stored as UTC round-trip format so a timezone change between write and
+        read cannot move the target.
+
+        Asserted against the RAW FILE, deliberately. Read-State goes through
+        ConvertFrom-Json, and Windows PowerShell 5.1 silently coerces an
+        ISO-8601 string into a [datetime] -- so the value handed back
+        stringifies through the CURRENT CULTURE ("9/8/2026 9:19:46 AM") and
+        has no trailing Z to find, whatever is genuinely on disk.
+
+        Matching against that failed on an en-US machine while the data it
+        was checking was perfectly correct, and under a culture that happens
+        to round-trip it would have PASSED for the wrong reason -- the worse
+        half, since a format regression would then ship unnoticed. PS7's
+        ConvertFrom-Json coerces differently again, so the parsed value is
+        the wrong thing to assert on in any edition.
+
+        What this test MEANS is "the bytes we persisted are UTC round-trip
+        format", so it reads the bytes.
+    #>
     It 'stores the target in UTC round-trip format' {
         Write-PendingAction 'shutdown' 60 'os-timer' (Get-Date).AddMinutes(1)
-        (Read-State).pendingAction.targetAt | Should -Match 'Z$'
+
+        $raw = Get-Content (Join-Path $sandbox 'state.json') -Raw -Encoding UTF8
+        $raw | Should -Match '"targetAt"\s*:\s*"[^"]+Z"'
+        # Same function writes both, and both have to survive a timezone change.
+        $raw | Should -Match '"startedAt"\s*:\s*"[^"]+Z"'
     }
 }
 
@@ -653,5 +675,247 @@ Describe 'Stop-TimedAction logging' {
         $log | Should -Match 'cancel-failed'
         # A failed cancel must never also claim to have succeeded.
         $log | Should -Not -Match 'cancelled'
+    }
+}
+
+<#
+    The v2.4 "Turn Off Monitor" freeze.
+
+    Invoke-MonitorOff blocked the WPF dispatcher twice over -- Start-Sleep, then
+    an unbounded SendMessage to HWND_BROADCAST that waits on every top-level
+    window in the session forever. One app not pumping its queue left the app
+    permanently at "(Not Responding)".
+
+    The rewrite is a state machine, and what is asserted here is the STATE, not
+    that a monitor happened to switch off. The three failures worth catching are
+    all invisible from the outside:
+
+      * a second click stacking a second poll on top of the first,
+      * an exception in the async plumbing leaving monitorOffPending stuck true,
+        which disables the button for the life of the process,
+      * a hung recipient -- the tolerated outcome SMTO_ABORTIFHUNG exists to
+        produce -- being reported as a failure.
+
+    The DispatcherTimer never ticks here (Pester runs no message pump), which is
+    exactly why Step-MonitorOff is a function: the poll is driven by hand.
+#>
+Describe 'Monitor off' {
+
+    BeforeAll {
+        # The clock and the idle reading are seams, so a test can place input
+        # activity and elapsed time wherever the case needs them. Nothing here
+        # touches a real display.
+        function Set-MonitorFakes {
+            $script:monSends      = New-Object System.Collections.ArrayList
+            $script:monIdle       = 0
+            $script:monNow        = 0
+            $script:monSendThrows = $false
+            $script:monSendResult = @{ Result = [IntPtr]1; LastError = 0 }
+
+            Set-MonitorSeam -GetIdleMs      { [int]$script:monIdle } `
+                            -GetMonotonicMs { [long]$script:monNow } `
+                            -SendMonitorOff {
+                                [void]$script:monSends.Add('send')
+                                if ($script:monSendThrows) { throw 'fake send blew up' }
+                                return $script:monSendResult
+                            }
+        }
+    }
+
+    BeforeEach {
+        $sandbox = New-Sandbox
+        Set-LogFilePath (Join-Path $sandbox 'log.txt')
+        Reset-MonitorOffState
+        Set-MonitorFakes
+    }
+    AfterEach {
+        Reset-MonitorOffState
+        Reset-MonitorSeam
+        Remove-Item $sandbox -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    Context 'the decision' {
+
+        It 'waits while the input that asked for it is still settling' {
+            Get-MonitorOffDecision 100 200 | Should -Be 'wait'
+        }
+
+        It 'sends once input has been quiet for the settle window' {
+            # Exactly at the boundary, not past it.
+            Get-MonitorOffDecision 700 100 | Should -Be 'send'
+        }
+
+        <#
+            The cap is the load-bearing half. Without it a hand resting on the
+            mouse holds IdleMs below the settle window indefinitely and the
+            display never turns off AT ALL -- a worse bug than the wake-back-on
+            the settle window exists to fix.
+        #>
+        It 'sends at the cap however busy the input is' {
+            Get-MonitorOffDecision 0   3000 | Should -Be 'send'
+            Get-MonitorOffDecision 699 3000 | Should -Be 'send'
+        }
+    }
+
+    Context 'the native outcome' {
+
+        # SendMessageTimeout returns non-zero on success.
+        It 'reports a normal send' {
+            Get-MonitorOffOutcome @{ Result = [IntPtr]1; LastError = 0 } | Should -Be 'sent'
+        }
+
+        <#
+            Zero with ERROR_TIMEOUT (1460), or with no error set at all, is
+            SMTO_ABORTIFHUNG doing its job: a window that was not pumping got
+            skipped. Other windows may well have handled the command and the
+            display very likely did go off. Calling that a failure would put an
+            alarming line in the log for an ordinary broadcast.
+        #>
+        It 'treats a hung recipient as tolerated, not a failure' {
+            Get-MonitorOffOutcome @{ Result = [IntPtr]::Zero; LastError = [WinApi]::ERROR_TIMEOUT } |
+                Should -Be 'hung'
+            Get-MonitorOffOutcome @{ Result = [IntPtr]::Zero; LastError = 0 } | Should -Be 'hung'
+        }
+
+        # ERROR_ACCESS_DENIED. Swallowing this is the silence that hid the
+        # original freeze for a whole release.
+        It 'reports a genuine failure' {
+            Get-MonitorOffOutcome @{ Result = [IntPtr]::Zero; LastError = 5 } | Should -Be 'failed'
+        }
+    }
+
+    Context 'the pending operation' {
+
+        <#
+            The direct regression for the deleted Start-Sleep -Milliseconds 300.
+            Anything that blocks here blocks the dispatcher, and on the Win+Alt+M
+            path it blocks inside a WndProc.
+        #>
+        It 'returns immediately rather than blocking the dispatcher' {
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            Invoke-MonitorOff
+            $sw.Stop()
+            $sw.ElapsedMilliseconds | Should -BeLessThan 200
+        }
+
+        It 'stays pending across a wait step' {
+            $script:monNow  = 1000
+            Invoke-MonitorOff
+            $script:monNow  = 1100
+            $script:monIdle = 50          # input still busy
+            Step-MonitorOff
+            $script:monSends.Count      | Should -Be 0
+            Test-MonitorOffPending      | Should -BeTrue
+        }
+
+        <#
+            The reentrancy guard, asserted through behaviour rather than through
+            the flag itself.
+
+            Invoke-MonitorOff sets monitorOffStarted. If the second click were
+            let through it would reset that to 3500, leaving the step below only
+            500 ms into a fresh settle window -- and it would wait. It sends
+            instead, which is only possible if the second click was ignored and
+            the ORIGINAL 1000 start is still in force.
+
+            This is what a pending flag cleared in Invoke-MonitorOff's own
+            finally would fail: by the time the second click arrived the flag
+            would already be false, and a second poll would be armed alongside
+            the first.
+        #>
+        It 'a second click does not restart the settle window' {
+            $script:monNow = 1000
+            Invoke-MonitorOff
+            Test-MonitorOffPending | Should -BeTrue
+
+            $script:monNow = 3500
+            Invoke-MonitorOff                 # the double-click
+
+            $script:monNow  = 4000            # 3000 ms past the original start
+            $script:monIdle = 0               # still busy, so only the cap can fire
+            Step-MonitorOff
+
+            $script:monSends.Count | Should -Be 1
+            Test-MonitorOffPending | Should -BeFalse
+        }
+
+        It 'allows a fresh operation once the first has completed' {
+            $script:monNow = 0
+            Invoke-MonitorOff
+            $script:monNow = 5000
+            Step-MonitorOff
+            Test-MonitorOffPending | Should -BeFalse
+
+            Invoke-MonitorOff
+            Test-MonitorOffPending | Should -BeTrue
+        }
+    }
+
+    Context 'failure paths' {
+
+        <#
+            An exception inside the new async plumbing must not strand the flag.
+            If it did, Turn Off Monitor would be dead for the rest of the
+            session with nothing on screen to say why -- the button would simply
+            stop doing anything.
+        #>
+        It 'clears the flag when the send throws, and logs it' {
+            $script:monSendThrows = $true
+            Invoke-MonitorOff
+            $script:monNow = 5000
+
+            { Step-MonitorOff } | Should -Not -Throw
+
+            Test-MonitorOffPending | Should -BeFalse
+            (Get-Content (Join-Path $sandbox 'log.txt') -Raw) | Should -Match 'off-failed'
+
+            # ...and the feature still works afterwards.
+            Invoke-MonitorOff
+            Test-MonitorOffPending | Should -BeTrue
+        }
+
+        <#
+            A native BOOL-style failure returns a value; it does not throw. That
+            is why the seam hands back @{ Result; LastError } instead of a raw
+            IntPtr -- a try/catch around the P/Invoke would catch nothing.
+        #>
+        It 'logs a failing native result, which never throws on its own' {
+            $script:monSendResult = @{ Result = [IntPtr]::Zero; LastError = 5 }
+            Invoke-MonitorOff
+            $script:monNow = 5000
+
+            Step-MonitorOff
+
+            Test-MonitorOffPending | Should -BeFalse
+            (Get-Content (Join-Path $sandbox 'log.txt') -Raw) | Should -Match 'off-failed'
+        }
+
+        # A skipped hung window is not worth alarming the user about.
+        It 'does not log a failure when a recipient was merely hung' {
+            $script:monSendResult = @{ Result = [IntPtr]::Zero; LastError = [WinApi]::ERROR_TIMEOUT }
+            Invoke-MonitorOff
+            $script:monNow = 5000
+
+            Step-MonitorOff
+
+            $log = Get-Content (Join-Path $sandbox 'log.txt') -Raw
+            $log | Should -Match 'outcome=hung'
+            $log | Should -Not -Match 'off-failed'
+        }
+
+        <#
+            One attempt, then stop. Re-arming the poll after a failure would turn
+            a transient fault into a 10 Hz message storm.
+        #>
+        It 'does not retry after a failure' {
+            $script:monSendResult = @{ Result = [IntPtr]::Zero; LastError = 5 }
+            Invoke-MonitorOff
+            $script:monNow = 5000
+            Step-MonitorOff
+
+            # A stray tick arriving after completion must do nothing at all.
+            Step-MonitorOff
+            $script:monSends.Count | Should -Be 1
+        }
     }
 }

@@ -1,5 +1,65 @@
 ﻿# Changelog
 
+## v2.4.1 - 2026-09-08
+
+One bug, reported from using v2.4, with two visible halves and a single cause.
+
+### Fixed
+
+**Turn Off Monitor froze the app.** With a timer running, pressing **Turn Off
+Monitor** (or `Win+Alt+M`) blanked the display, woke it again almost at once,
+and left the window stuck at "Timed Shutdown (Not Responding)" until it was
+force-quit. The timer itself was never harmed — `shutdown.exe /t` is an
+OS-level timer that the app only mirrors — but the monitor could not be turned
+off at all.
+
+`Invoke-MonitorOff` was two lines and both blocked the WPF dispatcher:
+
+```powershell
+Start-Sleep -Milliseconds 300
+[WinApi]::SendMessage([WinApi]::HWND_BROADCAST, ...)
+```
+
+`SendMessage` to `HWND_BROADCAST` delivers to every top-level window in the
+session, one at a time, and waits on each one with **no timeout**. A single
+background app not pumping its message queue therefore parks our UI thread
+inside `user32.dll` indefinitely; WPF stops pumping and Windows paints the
+"(Not Responding)" ghost window. The broadcast now goes through
+`SendMessageTimeout` with `SMTO_ABORTIFHUNG`.
+
+That bound is per *recipient*, not for the broadcast as a whole — several hung
+windows still sum — so the guarantee is stated honestly as "no single window can
+block us indefinitely". An unbounded wait became a finite one.
+
+A timer made it reproducible rather than occasional: the whole body of the 1 Hz
+tick that does real work — notification, guard evaluation, and `Add-SnoozeTime`,
+which spawns `shutdown.exe` — sits inside `if ($tracked)`, so with a timer armed
+there was heavy re-entrant work queued behind the broadcast and nothing to run
+it.
+
+`Start-Sleep` was doing the opposite of what its comment claimed. It was meant
+as a pause "so the click's own input event doesn't wake the display again", but
+blocking the UI thread prevents that input from draining rather than allowing
+it. Turning the monitor off is now an asynchronous operation: a `DispatcherTimer`
+polls `GetLastInputInfo` and sends once input has genuinely been quiet for
+700 ms, giving up and sending anyway after 3 s so a hand resting on the mouse
+cannot mean the display never turns off at all. Nothing on the path blocks, and
+`Invoke-MonitorOff` returns immediately — which matters most on the `Win+Alt+M`
+path, where all of the above previously ran *inside* a window procedure.
+
+`Source.Tests.ps1` now fails the build on any `Start-Sleep` in `src\`, or any
+`SendMessage` to `HWND_BROADCAST`. Both checks parse the source rather than
+grepping it, so the comment in `Power.ps1` that quotes the old implementation
+does not trip them.
+
+**A timestamp test passed or failed depending on your locale.** The assertion
+that pending actions are stored in UTC round-trip format read the value back
+through `Read-State`, and Windows PowerShell 5.1's `ConvertFrom-Json` silently
+coerces an ISO-8601 string into a `[datetime]` — so it was matching `Z$`
+against a culture-formatted `"9/8/2026 9:19:46 AM"`. The stored data was correct
+throughout. The test now asserts against the bytes on disk, which is what it
+always meant, and no longer varies by culture or PowerShell edition.
+
 ## v2.4 - 2026-09-07
 
 Usability. Three of these were reported from using v2.3, and the fourth was a

@@ -32,6 +32,30 @@ public class WinApi {
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
 
+    // The BOUNDED form, and the only one that may be used with HWND_BROADCAST.
+    //
+    // A broadcast delivers to every top-level window in the session, one at a
+    // time, and plain SendMessage waits on each of them FOREVER. A single app
+    // that is not pumping its queue therefore wedges our UI thread inside
+    // user32 for good -- which is exactly how the v2.4 "Turn Off Monitor"
+    // freeze happened, right down to the "(Not Responding)" ghost window.
+    //
+    // NB the timeout applies to each RECIPIENT individually, NOT to the
+    // broadcast as a whole: several hung windows can still sum to more than
+    // uTimeout. What this buys is "no single window can block us
+    // indefinitely" -- an unbounded wait becomes a finite one. It is not a
+    // wall-clock cap on the whole call, so do not document it as one.
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam,
+        IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+
+    // Skip a hung recipient instead of waiting out its whole timeout.
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    // What GetLastError reports when a recipient timed out rather than failed.
+    // The difference decides whether the send is worth reporting to the user.
+    public const int ERROR_TIMEOUT = 1460;
+
     [DllImport("user32.dll")]
     public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
 

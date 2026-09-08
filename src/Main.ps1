@@ -14,7 +14,7 @@
 # Shown in the header, the tray tooltip, and every log line. NOT in Window.Title:
 # the single-instance guard finds the existing window by exact title, so the
 # title has to stay stable across versions.
-$script:APP_VERSION = '2.4'
+$script:APP_VERSION = '2.4.1'
 
 # The project root: the folder holding tools\ and TimedShutdown.bat. Both entry
 # points sit one level below it - src\Main.ps1 during development, and

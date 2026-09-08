@@ -287,3 +287,71 @@ Describe 'Runs without elevation' {
         $bat | Should -Not -Match '(?i)-Verb RunAs'
     }
 }
+
+
+<#
+    The v2.4 "Turn Off Monitor" freeze, as a static rule.
+
+    Invoke-MonitorOff blocked the WPF dispatcher with Start-Sleep and then
+    handed it to an unbounded SendMessage(HWND_BROADCAST, ...), which waits on
+    every top-level window in the session with no timeout and no way out. The
+    app sat at "(Not Responding)" until it was force-quit, every single time.
+
+    PROJECT POLICY, not a universal PowerShell rule. Every code path in src/
+    runs on the WPF dispatcher -- this app has no background thread anywhere --
+    so a blanket ban on Start-Sleep is a faithful statement of the real
+    invariant here rather than a superstition about a useful cmdlet. If genuine
+    off-thread work is ever added, NARROW this rule to the UI entry points; do
+    not delete it. The invariant is "the dispatcher is never blocked", and its
+    sharper form is that a WndProc must never call anything that can block at
+    all -- which is what made the Win+Alt+M path the worse of the two.
+#>
+Describe 'UI thread is never blocked' {
+
+    BeforeAll {
+        $script:uiSrc = @(Get-ChildItem -Path $script:srcDir -Recurse -Include '*.ps1' -File)
+
+        <#
+            Parsed, not grepped, and deliberately so: Core/Power.ps1 quotes the
+            old two-line implementation verbatim in a comment, so the next reader
+            can see what was wrong. A regex would flag that comment forever and
+            the rule would be deleted rather than fixed.
+        #>
+        function Get-CommandCalls ([string]$Path, [string]$Name) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            return @($ast.FindAll({
+                $args[0] -is [System.Management.Automation.Language.CommandAst] -and
+                "$($args[0].GetCommandName())" -eq $Name }, $true))
+        }
+
+        function Get-UnboundedBroadcast ([string]$Path) {
+            $ast = [System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$null, [ref]$null)
+            return @($ast.FindAll({
+                $n = $args[0]
+                $n -is [System.Management.Automation.Language.InvokeMemberExpressionAst] -and
+                "$($n.Member)" -eq 'SendMessage' -and
+                $n.Arguments -and $n.Arguments.Count -gt 0 -and
+                "$($n.Arguments[0].Extent.Text)" -match 'HWND_BROADCAST' }, $true))
+        }
+    }
+
+    It 'no source file calls Start-Sleep' {
+        $offenders = @($script:uiSrc | Where-Object {
+            (Get-CommandCalls $_.FullName 'Start-Sleep').Count -gt 0
+        })
+        ($offenders | ForEach-Object { $_.Name }) -join ', ' | Should -BeNullOrEmpty
+    }
+
+    <#
+        A broadcast must go through SendMessageTimeout + SMTO_ABORTIFHUNG. That
+        bounds each RECIPIENT individually -- it is NOT a wall-clock cap on the
+        whole broadcast, since several hung windows still sum -- but it is the
+        difference between a finite wait and an infinite one.
+    #>
+    It 'never broadcasts through the unbounded SendMessage' {
+        $offenders = @($script:uiSrc | Where-Object {
+            (Get-UnboundedBroadcast $_.FullName).Count -gt 0
+        })
+        ($offenders | ForEach-Object { $_.Name }) -join ', ' | Should -BeNullOrEmpty
+    }
+}

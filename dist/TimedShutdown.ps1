@@ -2,7 +2,7 @@
 <#
     Timed Shutdown - GENERATED FILE, DO NOT EDIT.
 
-    Built from src\ by build.ps1 on 2026-09-07 06:43:23.
+    Built from src\ by build.ps1 on 2026-09-08 05:34:45.
     Edit the files under src\ and re-run build.ps1 instead.
 #>
 
@@ -21,7 +21,7 @@
 # Shown in the header, the tray tooltip, and every log line. NOT in Window.Title:
 # the single-instance guard finds the existing window by exact title, so the
 # title has to stay stable across versions.
-$script:APP_VERSION = '2.4'
+$script:APP_VERSION = '2.4.1'
 
 # The project root: the folder holding tools\ and TimedShutdown.bat. Both entry
 # points sit one level below it - src\Main.ps1 during development, and
@@ -61,6 +61,30 @@ public struct LASTINPUTINFO {
 public class WinApi {
     [DllImport("user32.dll")]
     public static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+
+    // The BOUNDED form, and the only one that may be used with HWND_BROADCAST.
+    //
+    // A broadcast delivers to every top-level window in the session, one at a
+    // time, and plain SendMessage waits on each of them FOREVER. A single app
+    // that is not pumping its queue therefore wedges our UI thread inside
+    // user32 for good -- which is exactly how the v2.4 "Turn Off Monitor"
+    // freeze happened, right down to the "(Not Responding)" ghost window.
+    //
+    // NB the timeout applies to each RECIPIENT individually, NOT to the
+    // broadcast as a whole: several hung windows can still sum to more than
+    // uTimeout. What this buys is "no single window can block us
+    // indefinitely" -- an unbounded wait becomes a finite one. It is not a
+    // wall-clock cap on the whole call, so do not document it as one.
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint Msg, IntPtr wParam,
+        IntPtr lParam, uint fuFlags, uint uTimeout, out UIntPtr lpdwResult);
+
+    // Skip a hung recipient instead of waiting out its whole timeout.
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    // What GetLastError reports when a recipient timed out rather than failed.
+    // The difference decides whether the send is worth reporting to the user.
+    public const int ERROR_TIMEOUT = 1460;
 
     [DllImport("user32.dll")]
     public static extern bool GetLastInputInfo(ref LASTINPUTINFO plii);
@@ -2180,11 +2204,245 @@ function Reset-OsTimer ([string]$Flag, [int]$Seconds) {
 
 # ── Quick actions ─────────────────────────────────────────────────────────────
 
+<#
+    Turning the monitor off, as a bounded ASYNCHRONOUS operation.
+
+    The v2.4 version was two lines and both were wrong:
+
+        Start-Sleep -Milliseconds 300
+        [WinApi]::SendMessage([WinApi]::HWND_BROADCAST, ...)
+
+    Start-Sleep blocked the WPF dispatcher, and the unbounded broadcast blocked
+    it again -- that one potentially forever, since SendMessage to
+    HWND_BROADCAST waits on every top-level window in the session with no
+    timeout at all. One app not pumping its queue left Timed Shutdown
+    permanently at "(Not Responding)", needing a force-quit. The Win+Alt+M path
+    was worse still: it ran all of that INSIDE a WndProc.
+
+    So nothing here blocks. Invoke-MonitorOff records the start, arms a
+    DispatcherTimer and returns; Step-MonitorOff runs one poll step per tick and
+    performs the send once input has settled. The send is bounded per recipient
+    by SendMessageTimeout + SMTO_ABORTIFHUNG.
+
+    Splitting it this way is also what makes it testable: the state machine is
+    three plain functions, and the timer is plumbing that only calls into them.
+#>
+
+# Input must be quiet this long before sending. Firing while the click that
+# asked for it is still settling just wakes the display straight back up.
+$script:MONITOR_SETTLE_MS = 700
+
+# ...but never wait longer than this. Without a cap, a hand resting on the mouse
+# means the display never turns off AT ALL -- a worse bug than the one the
+# settle window exists to fix.
+$script:MONITOR_MAX_WAIT_MS = 3000
+
+$script:MONITOR_POLL_MS = 100
+
+# PER RECIPIENT, not for the broadcast as a whole. See Interop.ps1.
+$script:MONITOR_SEND_TIMEOUT_MS = 1000
+
+$script:monitorOffPending = $false
+$script:monitorOffTimer   = $null
+$script:monitorOffStarted = 0
+
+<#
+    Test seams, the same shape as the shutdown.exe / powercfg ones above.
+
+    The send returns @{ Result; LastError } rather than the raw IntPtr because a
+    native BOOL-style failure does NOT raise a PowerShell exception. Wrapping
+    the P/Invoke in try/catch would catch nothing whatsoever, and we would be
+    back to the silent failure this change exists to remove. The caller has to
+    inspect the value, so the value has to carry the error code with it.
+#>
+$script:DefaultSendMonitorOff = {
+    $res = [UIntPtr]::Zero
+    $rc  = [WinApi]::SendMessageTimeout([WinApi]::HWND_BROADCAST, [WinApi]::WM_SYSCOMMAND,
+               [IntPtr][WinApi]::SC_MONITORPOWER, [IntPtr]2,
+               [WinApi]::SMTO_ABORTIFHUNG, [uint32]$script:MONITOR_SEND_TIMEOUT_MS, [ref]$res)
+    # Read the error IMMEDIATELY. The thread's last-error value is clobbered by
+    # the next call that sets one, so anything in between -- even a pipeline --
+    # can substitute a completely unrelated code.
+    $err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+    return @{ Result = $rc; LastError = $err }
+}
+
+$script:DefaultGetIdleMs = { [int][WinApi]::GetIdleMs() }
+
+# Deliberately NOT Core/Triggers.ps1's Get-MonotonicMs, despite being the same
+# one-liner: Power.ps1 is dot-sourced ALONE by tests/Power.Tests.ps1, so taking
+# a dependency on Triggers.ps1 would break that file on its next run. Same
+# reasoning as Write-PowerLog treating Core/Log.ps1 as optional.
+$script:DefaultGetMonotonicMs = { [long][WinApi]::GetTickCount64() }
+
+$script:SendMonitorOff = $script:DefaultSendMonitorOff
+$script:GetIdleMs      = $script:DefaultGetIdleMs
+$script:GetMonotonicMs = $script:DefaultGetMonotonicMs
+
+function Set-MonitorSeam {
+    param(
+        [scriptblock] $SendMonitorOff = $null,
+        [scriptblock] $GetIdleMs      = $null,
+        [scriptblock] $GetMonotonicMs = $null
+    )
+    if ($SendMonitorOff) { $script:SendMonitorOff = $SendMonitorOff }
+    if ($GetIdleMs)      { $script:GetIdleMs      = $GetIdleMs }
+    if ($GetMonotonicMs) { $script:GetMonotonicMs = $GetMonotonicMs }
+}
+
+function Reset-MonitorSeam {
+    $script:SendMonitorOff = $script:DefaultSendMonitorOff
+    $script:GetIdleMs      = $script:DefaultGetIdleMs
+    $script:GetMonotonicMs = $script:DefaultGetMonotonicMs
+}
+
+function Test-MonitorOffPending { return $script:monitorOffPending }
+
+# Drops an armed poll. Separate from the pending flag on purpose: a 'wait' step
+# must keep the flag while doing none of this.
+function Stop-MonitorOffPoll {
+    if ($script:monitorOffTimer) {
+        try { $script:monitorOffTimer.Stop() } catch {}
+    }
+    $script:monitorOffTimer = $null
+}
+
+# Back to "nothing in flight", for the failure paths and for tests between cases.
+function Reset-MonitorOffState {
+    Stop-MonitorOffPoll
+    $script:monitorOffPending = $false
+}
+
+<#
+    Whether this poll step should send yet. Pure: no clock, no I/O, no state.
+
+    Milliseconds and integers throughout -- everything upstream is already
+    tick-based, and converting to fractional seconds here would only introduce
+    rounding at exactly the boundaries the tests pin down.
+
+      WaitedMs >= MONITOR_MAX_WAIT_MS  -> send, whatever the input is doing
+      IdleMs   >= MONITOR_SETTLE_MS    -> send
+      otherwise                        -> wait
+#>
+function Get-MonitorOffDecision ([int]$IdleMs, [int]$WaitedMs) {
+    if ($WaitedMs -ge $script:MONITOR_MAX_WAIT_MS) { return 'send' }
+    if ($IdleMs   -ge $script:MONITOR_SETTLE_MS)   { return 'send' }
+    return 'wait'
+}
+
+<#
+    Classifies what the native send actually did.
+
+    $Sent is the @{ Result; LastError } handed back by the send seam. Return
+    exactly one of:
+
+      'sent'   - the request went through normally.
+      'hung'   - at least one recipient was skipped because it was not pumping
+                 its queue. SMTO_ABORTIFHUNG exists to produce this; other
+                 windows may well have handled the command, and the display very
+                 likely did go off. NOT a failure.
+      'failed' - the call genuinely did not work, and is worth a log entry.
+
+    The Win32 shape: SendMessageTimeout returns non-zero on success. Zero means
+    either "timed out or aborted on a hung recipient" or "failed outright", and
+    the only thing separating those two is the error code captured alongside it
+    -- [WinApi]::ERROR_TIMEOUT (1460), or 0 when the call set no error at all.
+
+    Both ways of getting this wrong have already shipped in this app: crying
+    wolf turns an ordinary broadcast into an alarming log line, and swallowing
+    the failure is exactly the silence that hid the original freeze for a whole
+    release.
+#>
+function Get-MonitorOffOutcome ($Sent) {
+    # No result object at all means the seam itself is broken. Guessing
+    # 'sent' here would be the silence this function exists to end.
+    if (-not $Sent) { return 'failed' }
+
+    # Non-zero is a plain success and needs no error inspection.
+    if ([IntPtr]$Sent.Result -ne [IntPtr]::Zero) { return 'sent' }
+
+    # Zero is ambiguous, and only the error code separates the two cases.
+    # ERROR_TIMEOUT is SMTO_ABORTIFHUNG doing exactly its job; 0 is the
+    # call declining to set an error at all, which is the same story. Every
+    # OTHER code is a real fault -- ERROR_ACCESS_DENIED and friends -- and
+    # gets reported rather than swallowed.
+    $err = [int]$Sent.LastError
+    if ($err -eq 0 -or $err -eq [WinApi]::ERROR_TIMEOUT) { return 'hung' }
+    return 'failed'
+}
+
+<#
+    One poll step. The DispatcherTimer calls this; tests call it directly, which
+    is the entire reason it is a function rather than an inline scriptblock.
+
+    Every terminal path -- sent, tolerated, or thrown -- stops the timer, drops
+    the reference and clears the pending flag. A path that misses one leaves
+    either a timer ticking forever or monitorOffPending stuck true, and the
+    second of those disables the button for the life of the process.
+
+    One attempt only: a failed send logs and stops. Re-arming the poll after a
+    failure would turn a transient fault into a 10Hz message storm.
+#>
+function Step-MonitorOff {
+    # A tick queued before Stop() still arrives. Anything past here
+    # would send a SECOND time on an operation that already finished.
+    if (-not $script:monitorOffPending) { return }
+
+    $complete = $false
+    try {
+        $waited = [int]((& $script:GetMonotonicMs) - $script:monitorOffStarted)
+        $idle   = [int](& $script:GetIdleMs)
+        if ((Get-MonitorOffDecision $idle $waited) -eq 'wait') { return }
+
+        # Past here the operation is over however it goes, so tear the poll down
+        # BEFORE sending: a throw inside the send must not leave it armed.
+        $complete = $true
+        Stop-MonitorOffPoll
+
+        $outcome = Get-MonitorOffOutcome (& $script:SendMonitorOff)
+        if ($outcome -eq 'failed') {
+            Write-PowerLog 'monitor' 'off-failed' "waitedMs=$waited idleMs=$idle"
+        } else {
+            Write-PowerLog 'monitor' 'off' "outcome=$outcome waitedMs=$waited idleMs=$idle"
+        }
+    } catch {
+        $complete = $true
+        Stop-MonitorOffPoll
+        Write-PowerLog 'monitor' 'off-failed' $_.Exception.Message
+    } finally {
+        # Deliberately NOT unconditional: a 'wait' step has to leave the flag
+        # set, or the next click would arm a second poll alongside this one.
+        if ($complete) { $script:monitorOffPending = $false }
+    }
+}
+
+<#
+    Arms the poll and returns AT ONCE. Safe to call from a WndProc.
+
+    The pending flag is set here and deliberately NOT cleared here: it has to
+    stay true for the whole asynchronous operation, which outlives this function
+    by design. Clearing it in a finally would make it useless -- the second click
+    of a double-click would arrive after the flag had already gone false and arm
+    a second, overlapping poll, which is precisely the stacking it exists to
+    prevent. Only a terminal Step-MonitorOff path clears it.
+#>
 function Invoke-MonitorOff {
-    # Brief pause so the click's own input event doesn't wake the display again.
-    Start-Sleep -Milliseconds 300
-    [WinApi]::SendMessage([WinApi]::HWND_BROADCAST, [WinApi]::WM_SYSCOMMAND,
-        [IntPtr][WinApi]::SC_MONITORPOWER, [IntPtr]2) | Out-Null
+    if ($script:monitorOffPending) { return }
+    $script:monitorOffPending = $true
+    $script:monitorOffStarted = & $script:GetMonotonicMs
+
+    try {
+        $t = New-Object System.Windows.Threading.DispatcherTimer
+        $t.Interval = [timespan]::FromMilliseconds($script:MONITOR_POLL_MS)
+        $t.Add_Tick({ Step-MonitorOff })
+        $script:monitorOffTimer = $t
+        $t.Start()
+    } catch {
+        # Could not arm at all -- release the flag, or the button is dead for the
+        # rest of the session.
+        Reset-MonitorOffState
+        Write-PowerLog 'monitor' 'off-failed' "could not arm: $($_.Exception.Message)"
+    }
 }
 
 function Invoke-LockScreen {
