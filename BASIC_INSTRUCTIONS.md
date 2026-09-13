@@ -1,4 +1,6 @@
-﻿# Timed Shutdown — Basic Instructions
+@project-baseline.md
+
+# Timed Shutdown — Basic Instructions
 
 ---
 
